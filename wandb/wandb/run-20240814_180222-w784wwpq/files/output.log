@@ -1,0 +1,76 @@
+
+Processing split: train-clean-100...
+/share/nas169/jerryyang/whisper-flamingo/utils.py:651: UserWarning: PySoundFile failed. Trying audioread instead.
+  wav_data, sample_rate = librosa.load(audio_path, sr=None)
+/share/homes/jerryyang/.local/lib/python3.8/site-packages/librosa/core/audio.py:184: FutureWarning: librosa.core.audio.__audioread_load
+	Deprecated as of librosa version 0.10.0.
+	It will be removed in librosa version 1.0.
+  y, sr_native = __audioread_load(path, offset, duration, dtype)
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0020.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0020.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0005.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0005.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0003.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0003.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0027.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0027.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0025.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0025.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0010.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0010.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0036.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0036.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0029.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0029.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0031.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0031.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0037.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0037.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0038.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0038.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0001.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0001.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0011.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0011.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0028.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0028.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0024.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0024.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0013.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-100/4898/20016/4898-20016-0013.flac'
+Train set: 5366 samples loaded.
+Processing split: train-clean-360...
+/share/nas169/jerryyang/whisper-flamingo/utils.py:651: UserWarning: PySoundFile failed. Trying audioread instead.
+  wav_data, sample_rate = librosa.load(audio_path, sr=None)
+/share/homes/jerryyang/.local/lib/python3.8/site-packages/librosa/core/audio.py:184: FutureWarning: librosa.core.audio.__audioread_load
+	Deprecated as of librosa version 0.10.0.
+	It will be removed in librosa version 1.0.
+  y, sr_native = __audioread_load(path, offset, duration, dtype)
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0022.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0022.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0000.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0000.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0059.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0059.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0057.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0057.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0030.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0030.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0052.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0052.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0053.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0053.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0010.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0010.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0013.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0013.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0039.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0039.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0008.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0008.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0034.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0034.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0054.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0054.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0021.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0021.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0036.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0036.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0048.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0048.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0047.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0047.flac'
+Error loading audio /share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0042.flac: [Errno 112] Host is down: '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech/train-clean-360/7286/92935/7286-92935-0042.flac'
+Train set: 25912 samples loaded.
+Processing split: train-other-500...
+Train set: 64218 samples loaded.
+Processing split: dev-clean...
+Valid set: 2136 samples loaded.
+Processing split: dev-other...
+Valid set: 4560 samples loaded.
+Processing split: test-clean...
+Test set: 2007 samples loaded.
+Processing split: test-other...
+Test set: 4457 samples loaded.
+Loading Whisper model and weights
+Whisper dropout rate : 0
+Using 16bit Automatic Mixed Precision (AMP)
+Traceback (most recent call last):
+  File "whisper_ft_librispeech.py", line 325, in <module>
+    trainer = Trainer(
+  File "/share/homes/jerryyang/.local/lib/python3.8/site-packages/pytorch_lightning/utilities/argparse.py", line 70, in insert_env_defaults
+    return fn(self, **kwargs)
+  File "/share/homes/jerryyang/.local/lib/python3.8/site-packages/pytorch_lightning/trainer/trainer.py", line 431, in __init__
+    self._callback_connector.on_trainer_init(
+  File "/share/homes/jerryyang/.local/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/callback_connector.py", line 79, in on_trainer_init
+    _validate_callbacks_list(self.trainer.callbacks)
+  File "/share/homes/jerryyang/.local/lib/python3.8/site-packages/pytorch_lightning/trainer/connectors/callback_connector.py", line 231, in _validate_callbacks_list
+    raise RuntimeError(
+RuntimeError: Found more than one stateful callback of type `ModelCheckpoint`. In the current configuration, this callback does not support being saved alongside other instances of the same type. Please consult the documentation of `ModelCheckpoint` regarding valid settings for the callback state to be checkpointable. HINT: The `callback.state_key` must be unique among all callbacks in the Trainer.

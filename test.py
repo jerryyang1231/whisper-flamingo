@@ -68,19 +68,25 @@
 # print(result)
 # # This will output the translation of the provided English text into Chinese.
 
-from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
+# from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
 
-article_en = "An apple a day, keep doctor away."
+# article_en = "An apple a day, keep doctor away."
 
-model = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
-tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+# model = MBartForConditionalGeneration.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
+# tokenizer = MBart50TokenizerFast.from_pretrained("facebook/mbart-large-50-many-to-many-mmt")
 
-# translate English to Chinese
-tokenizer.src_lang = "en_XX"
-encoded_en = tokenizer(article_en, return_tensors="pt")
-generated_tokens = model.generate(
-    **encoded_en,
-    forced_bos_token_id=tokenizer.lang_code_to_id["zh_CN"]
-)
-output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
-print("translated result :", output)
+# # translate English to Chinese
+# tokenizer.src_lang = "en_XX"
+# encoded_en = tokenizer(article_en, return_tensors="pt")
+# generated_tokens = model.generate(
+#     **encoded_en,
+#     forced_bos_token_id=tokenizer.lang_code_to_id["zh_CN"]
+# )
+# output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+# print("translated result :", output)
+
+import whisper
+import os
+
+print(whisper.__file__)
+

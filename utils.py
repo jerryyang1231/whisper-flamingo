@@ -473,12 +473,12 @@ def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, t
         auto_insert_metric_name=False,
     )
 
-    callback_list = [checkpoint_callback,
-                     val_checkpoint,
-                     latest_checkpoint, 
-                     LearningRateMonitor(logging_interval="step")]
     # callback_list = [checkpoint_callback,
+    #                  val_checkpoint,
+    #                  latest_checkpoint, 
     #                  LearningRateMonitor(logging_interval="step")]
+    callback_list = [checkpoint_callback,
+                     LearningRateMonitor(logging_interval="step")]
     return tflogger, checkpoint_callback, callback_list
 
 def wer_cer(hypo, ref):
@@ -592,13 +592,13 @@ def load_librispeech_data(audio_max_length, text_max_length,
     """
     audio_transcript_pair_list = {'train': [], 'valid': [], 'test': []}
     splits = {
-        # 'train-clean-100': 'train',
-        # 'train-clean-360': 'train',
-        # 'train-other-500': 'train',
+        'train-clean-100': 'train',
+        'train-clean-360': 'train',
+        'train-other-500': 'train',
         'dev-clean': 'valid',
-        # 'dev-other': 'valid',
-        # 'test-clean': 'test',
-        # 'test-other': 'test'
+        'dev-other': 'valid',
+        'test-clean': 'test',
+        'test-other': 'test'
     }
 
     for split, split_name in splits.items():
@@ -670,3 +670,91 @@ def load_librispeech_data(audio_max_length, text_max_length,
     
     return audio_transcript_pair_list
 
+import os
+import librosa
+
+def load_librispeech_data_2(audio_max_length, text_max_length, 
+                          librispeech_root="/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech",
+                          include_audio_lens=False, reduce_val=None):
+    """
+    加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
+    """
+    audio_transcript_pair_list = {'train': [], 'valid': [], 'test': []}
+    splits = {
+        # 'train-clean-100': 'train',
+        # 'train-clean-360': 'train',
+        # 'train-other-500': 'train',
+        'dev-clean': 'valid',
+        # 'dev-other': 'valid',
+        'test-clean': 'test',
+        # 'test-other': 'test'
+    }
+
+    for split, split_name in splits.items():
+        split_path = os.path.join(librispeech_root, split)
+        print(f"Processing split: {split}...")
+        
+        if not os.path.exists(split_path) or not os.path.isdir(split_path):
+            print(f"Skip non-existing or non-directory path: {split_path}")
+            continue
+        
+        for speaker_dir in os.listdir(split_path):
+            speaker_path = os.path.join(split_path, speaker_dir)
+            
+            # Make sure speaker_path is a directory before proceeding
+            if not os.path.isdir(speaker_path):
+                continue
+            
+            for chapter_dir in os.listdir(speaker_path):
+                chapter_path = os.path.join(speaker_path, chapter_dir)
+                # print(f"Processing chapter directory: {chapter_path}...")
+                
+                # Ensure chapter_path is a directory
+                if not os.path.isdir(chapter_path):
+                    continue
+                
+                transcript_file = os.path.join(chapter_path, f"{speaker_dir}-{chapter_dir}.trans.txt")
+                
+                if not os.path.exists(transcript_file):
+                    print(f"Missing transcript file: {transcript_file}")
+                    continue
+
+                transcripts = {}
+                with open(transcript_file, 'r') as file:
+                    for line in file:
+                        parts = line.strip().split(maxsplit=1)
+                        if len(parts) == 2:
+                            file_id, transcription = parts
+                            transcripts[file_id] = transcription
+
+                for audio_file in os.listdir(chapter_path):
+                    if audio_file.endswith('.flac'):
+                        file_id = audio_file.split('.')[0]
+                        audio_path = os.path.join(chapter_path, audio_file)
+                        text = transcripts.get(file_id, '')
+                        
+                        if len(text) > text_max_length:
+                            continue
+
+                        try:
+                            wav_data, sample_rate = librosa.load(audio_path, sr=None)
+                            audio_length = len(wav_data)
+                        except Exception as e:
+                            print(f"Error loading audio {audio_path}: {e}")
+                            continue
+                        
+                        if audio_length > audio_max_length:
+                            continue
+
+                        if include_audio_lens:
+                            audio_transcript_pair_list[split_name].append((audio_path, text, audio_length))
+                        else:
+                            audio_transcript_pair_list[split_name].append((audio_path, text))
+        
+        # Optionally reduce the size of the validation set
+        if split_name == 'valid' and reduce_val is not None:
+            audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
+        
+        print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
+    
+    return audio_transcript_pair_list

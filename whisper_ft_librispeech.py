@@ -25,6 +25,9 @@ from utils import (
 )
 from utils_batch_samplers import LengthBatchSampler
 import soundfile as sf
+import wandb 
+from pytorch_lightning.loggers import WandbLogger
+os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -161,8 +164,7 @@ class WhisperModelModule(LightningModule):
             print("REF:  {}".format(ref))
             if i == 1: break
         
-        # dataloader_idx抓不到，會報錯
-        log_prefix = {0: 'dev-clean', 1: 'dev-other', 2: 'test-clean', 3: 'test-other'}
+        log_prefix = {0: 'dev', 1: 'test'}
         self.log("{}/loss".format(log_prefix[dataloader_idx]), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/cer".format(log_prefix[dataloader_idx]), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/wer".format(log_prefix[dataloader_idx]), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
@@ -227,26 +229,27 @@ class WhisperModelModule(LightningModule):
                           collate_fn=WhisperDataCollatorWhithPadding()
                           )
     
-    def val_dataloader_noisy(self):
-        dataset = LibriSpeechDataset(self.__val_dataset, 
-                                      self.tokenizer, 
-                                      SAMPLE_RATE,
-                                      self.model_name,
-                                      max_length=None,
-                                      spec_augment=False,
-                                      noise_prob=1,
-                                      noise_fn=cfg.noise_fn_val,
-                                    )
-        length_sorter = LengthBatchSampler(batch_bins=self.cfg.audio_max_length * 8,
-                    shapes=[i[2] for i in self.__val_dataset],
-                    sort_in_batch='descending',
-                    sort_batch='descending',
-                    drop_last=False)
-        return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
-                          num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding()
-                          )
+    # def val_dataloader_noisy(self):
+    #     dataset = LibriSpeechDataset(self.__val_dataset, 
+    #                                   self.tokenizer, 
+    #                                   SAMPLE_RATE,
+    #                                   self.model_name,
+    #                                   max_length=None,
+    #                                   spec_augment=False,
+    #                                   noise_prob=1,
+    #                                   noise_fn=cfg.noise_fn_val,
+    #                                 )
+    #     length_sorter = LengthBatchSampler(batch_bins=self.cfg.audio_max_length * 8,
+    #                 shapes=[i[2] for i in self.__val_dataset],
+    #                 sort_in_batch='descending',
+    #                 sort_batch='descending',
+    #                 drop_last=False)
+    #     return torch.utils.data.DataLoader(dataset,
+    #                       batch_sampler=length_sorter,
+    #                       num_workers=self.cfg.num_worker,
+    #                       collate_fn=WhisperDataCollatorWhithPadding()
+    #                       )
+    
     def test_dataloader_clean(self):
         dataset = LibriSpeechDataset(self.__test_dataset, 
                                       self.tokenizer, 
@@ -268,26 +271,26 @@ class WhisperModelModule(LightningModule):
                           collate_fn=WhisperDataCollatorWhithPadding()
                           )
     
-    def test_dataloader_noisy(self):
-        dataset = LibriSpeechDataset(self.__test_dataset, 
-                                      self.tokenizer, 
-                                      SAMPLE_RATE,
-                                      self.model_name,
-                                      max_length=None,
-                                      spec_augment=False,
-                                      noise_prob=1,
-                                      noise_fn=cfg.noise_fn_test,
-                                    )
-        length_sorter = LengthBatchSampler(batch_bins=self.cfg.audio_max_length * 8,
-                    shapes=[i[2] for i in self.__test_dataset],
-                    sort_in_batch='descending',
-                    sort_batch='descending',
-                    drop_last=False)
-        return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
-                          num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding()
-                          )
+    # def test_dataloader_noisy(self):
+    #     dataset = LibriSpeechDataset(self.__test_dataset, 
+    #                                   self.tokenizer, 
+    #                                   SAMPLE_RATE,
+    #                                   self.model_name,
+    #                                   max_length=None,
+    #                                   spec_augment=False,
+    #                                   noise_prob=1,
+    #                                   noise_fn=cfg.noise_fn_test,
+    #                                 )
+    #     length_sorter = LengthBatchSampler(batch_bins=self.cfg.audio_max_length * 8,
+    #                 shapes=[i[2] for i in self.__test_dataset],
+    #                 sort_in_batch='descending',
+    #                 sort_batch='descending',
+    #                 drop_last=False)
+    #     return torch.utils.data.DataLoader(dataset,
+    #                       batch_sampler=length_sorter,
+    #                       num_workers=self.cfg.num_worker,
+    #                       collate_fn=WhisperDataCollatorWhithPadding()
+    #                       )
 
 cfg_yaml = sys.argv[1]
 with open(cfg_yaml, 'r') as file:
@@ -296,6 +299,12 @@ with open(cfg_yaml, 'r') as file:
 
 print(cfg)
 print("audio max length: {}".format(cfg.audio_max_length))
+
+# Initialize WandB
+wandb.init(project="whisper-flamingo",
+           config=cfg,
+           name="whisper finetune librispeech",
+)
 
 tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
                                                                             cfg.check_output_dir, 
@@ -310,12 +319,16 @@ model = WhisperModelModule(cfg, cfg.model_name, cfg.lang, audio_transcript_pair_
                                                           audio_transcript_pair_list['valid'],
                                                           audio_transcript_pair_list['test'])
 
+# Create a WandB logger instance
+wandb_logger = WandbLogger()
+
 trainer = Trainer(
     precision=cfg.precision,
     accelerator="gpu",
     max_steps=cfg.num_train_steps,
     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    logger=tflogger,
+    # logger=tflogger,
+    logger=[tflogger, wandb_logger],  # Add the WandB logger here
     callbacks=callback_list,
     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
     devices=cfg.num_devices,
@@ -330,5 +343,8 @@ resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
 if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
     trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.test_dataloader_clean()])
 else:
-    trainer.validate(model=model, dataloaders=[model.val_dataloader_clean()]) # validate before training
-    # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean()])
+    trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.test_dataloader_clean()]) # validate before training
+    trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.test_dataloader_clean()])
+
+# End the WandB run
+wandb.finish()

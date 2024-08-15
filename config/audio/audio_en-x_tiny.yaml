@@ -1,5 +1,5 @@
 train_name: whisper
-audio_max_length: 160000  # 10 秒的音頻
+audio_max_length: 160000  # 10 sec
 text_max_length: 300
 accelerator: auto
 weight_decay: 0.01
@@ -9,20 +9,20 @@ validate_every_n_batches: 1000
 num_devices: 1
 precision: 16-mixed
 
-model_name: tiny  # 使用 Whisper Tiny 模型
-learning_rate: 1.0e-5  # 根據較小模型調整學習率
-batch_size: 16  # 增加批次大小以適應小模型
-num_train_steps: 50000  # 減少訓練步驟數
+model_name: tiny  
+learning_rate: 1.0e-5  
+batch_size: 16  
+num_train_steps: 50000 
 warmup_steps: 500
 gradient_accumulation_steps: 1
 
-monitor: 'val/acc'  # 使用乾淨數據集的準確性作為監控指標
+monitor: 'dev/acc'  
 noise_prob: 0.0  # 移除噪音處理
 # noise_fn: ''  # 不需要噪音文件
 # noise_fn_val: ''
 # noise_fn_test: ''
 
-spec_augment: "ls-basic"  # 保留基本的Spec Augmentation
+spec_augment: "ls-basic" 
 dropout_rate: 0
 
 lang: en
