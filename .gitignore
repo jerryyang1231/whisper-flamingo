@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 *.tar.gz
 models
 models/
@@ -13,5 +12,6 @@ whisper/__pycache__/
 __pycache__/
 decode/
 experiments
-=======
-
+wandb
+slurm/train_audio_slurm
+slurm/train_text_slurm
