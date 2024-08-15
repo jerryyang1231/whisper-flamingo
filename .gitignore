@@ -13,5 +13,4 @@ __pycache__/
 decode/
 experiments
 wandb
-slurm/train_audio_slurm
 slurm/train_text_slurm
