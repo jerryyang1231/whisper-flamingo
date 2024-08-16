@@ -11,7 +11,7 @@ precision: 16-mixed
 
 model_name: tiny
 learning_rate: 1.0e-4 
-batch_size: 3
+batch_size: 16
 num_train_steps: 40000
 warmup_steps: 5000
 gradient_accumulation_steps: 1
@@ -27,17 +27,17 @@ noise_snr_train: 0
 # freeze_video_model: True
 # freeze_video_batch_norm_stats: False 
 
-spec_augment: "ls-basic"
+spec_augment: ""
 dropout_rate: 0 
 
 lang: en
-# pt_ckpt: models/whisper_en-x_tiny.pt
+# pt_ckpt: models/whisper_en_tiny.pt
 pt_ckpt: ''
 resume_training: False
-train_id: whisper-flamingo_en-x_tiny
+train_id: whisper-flamingo_en_tiny
 
-video_projection_train_only: False
-video_projection_separate_lr: ''
+# video_projection_train_only: False
+# video_projection_separate_lr: ''
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
 # text
@@ -46,6 +46,6 @@ at_fusion: separate
 
 translation_base_dir: "/share/nas169/jerryyang/corpus/m2m100/"
 log_output_dir: "slurm/train_text_slurm"
-check_output_dir: "models/checkpoint"
+check_output_dir: "models/checkpoints"
 
 

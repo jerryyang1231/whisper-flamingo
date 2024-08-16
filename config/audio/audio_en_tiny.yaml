@@ -1,6 +1,6 @@
 train_name: whisper
 audio_max_length: 160000  # 10 sec
-text_max_length: 300
+text_max_length: 350
 accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
@@ -10,25 +10,25 @@ num_devices: 1
 precision: 16-mixed
 
 model_name: tiny  
-learning_rate: 1.0e-5  
-batch_size: 16  
+learning_rate: 1.25e-5  # small
+batch_size: 16
 num_train_steps: 50000 
-warmup_steps: 500
+warmup_steps: 1000
 gradient_accumulation_steps: 1
 
 monitor: 'dev/acc'  
-noise_prob: 0.0  # 移除噪音處理
-# noise_fn: ''  # 不需要噪音文件
+noise_prob: 0.0  
+# noise_fn: ''  
 # noise_fn_val: ''
 # noise_fn_test: ''
 
-spec_augment: "ls-basic" 
+spec_augment: "" 
 dropout_rate: 0
 
 lang: en
 resume_training: false
 
-train_id: whisper_en-x_tiny
+train_id: whisper_en_tiny
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"

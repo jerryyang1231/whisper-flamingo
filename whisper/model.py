@@ -215,41 +215,41 @@ class AudioEncoder(nn.Module):
         if track_norm:
             x_norm = torch.linalg.norm(x, dim=-1).mean()
 
-        if self.video and not test_a:
-            if not self.av_hubert_encoder:
-                x_v = self.video_model(x_v) # B, F, T
-                x_v = x_v.permute(0, 2, 1) # B, T, F
-            else:
-                x_v = self.video_model(source={'video': x_v, 'audio': None}, padding_mask=padding_mask)
-                x_v = x_v['encoder_out'].permute(1, 0 , 2) # T, B, F -> B, T, F
+        # if self.video and not test_a:
+        #     if not self.av_hubert_encoder:
+        #         x_v = self.video_model(x_v) # B, F, T
+        #         x_v = x_v.permute(0, 2, 1) # B, T, F
+        #     else:
+        #         x_v = self.video_model(source={'video': x_v, 'audio': None}, padding_mask=padding_mask)
+        #         x_v = x_v['encoder_out'].permute(1, 0 , 2) # T, B, F -> B, T, F
                 
-            if track_norm:
-                x_v_norm_pre = torch.linalg.norm(x_v, dim=-1).mean()
+        #     if track_norm:
+        #         x_v_norm_pre = torch.linalg.norm(x_v, dim=-1).mean()
 
-            x_v = self.video_projection(x_v)
-            x_v = self.video_projection_scalar * x_v
+        #     x_v = self.video_projection(x_v)
+        #     x_v = self.video_projection_scalar * x_v
 
-            if track_norm:
-                x_v_norm_post = torch.linalg.norm(x_v, dim=-1).mean()
+        #     if track_norm:
+        #         x_v_norm_post = torch.linalg.norm(x_v, dim=-1).mean()
 
-            if not self.av_fusion == 'separate':
-                x_v = torch.repeat_interleave(x_v, 2, dim=1) # 25 Hz -> 50 Hz
+        #     if not self.av_fusion == 'separate':
+        #         x_v = torch.repeat_interleave(x_v, 2, dim=1) # 25 Hz -> 50 Hz
 
-            if self.av_fusion == "early":
-                mod_drop_prob = np.random.random()
-                if training:
-                    if 0 < mod_drop_prob <= self.prob_av:
-                        pass # use both modalities
-                    if self.prob_av < mod_drop_prob <= self.prob_av + self.prob_a:
-                        x_v = 0 * x_v # use audio
-                    else:
-                        x = 0 * x # use video
-                elif test_a:
-                    x_v = 0 * x_v # use audio
-                elif test_v:
-                    x = 0 * x # use video
-                crop_len = min(x.shape[1], x_v.shape[1])
-                x = x[:, :crop_len, :] + x_v[:, :crop_len, :]
+        #     if self.av_fusion == "early":
+        #         mod_drop_prob = np.random.random()
+        #         if training:
+        #             if 0 < mod_drop_prob <= self.prob_av:
+        #                 pass # use both modalities
+        #             if self.prob_av < mod_drop_prob <= self.prob_av + self.prob_a:
+        #                 x_v = 0 * x_v # use audio
+        #             else:
+        #                 x = 0 * x # use video
+        #         elif test_a:
+        #             x_v = 0 * x_v # use audio
+        #         elif test_v:
+        #             x = 0 * x # use video
+        #         crop_len = min(x.shape[1], x_v.shape[1])
+        #         x = x[:, :crop_len, :] + x_v[:, :crop_len, :]
 
         # NOTE: pos embedding has max length of 1500 (30s after conv downsample from 3000 mel frames)
         if x.shape[1] > 1500:
@@ -262,12 +262,11 @@ class AudioEncoder(nn.Module):
             x = block(x)
 
         x = self.ln_post(x)
-
-        if track_norm:
-            return x, x_norm, x_v_norm_pre, x_v_norm_post, x_v
-        return x, x_v
         
-
+        if track_norm:
+            return x, x_norm
+            # return x, x_norm, x_v_norm_pre, x_v_norm_post, x_v
+        return x, x_v
 
 class TextDecoder(nn.Module):
     def __init__(

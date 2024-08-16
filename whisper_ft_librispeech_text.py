@@ -19,7 +19,7 @@ from utils import (
     load_librispeech_data_2,  # 使用專門為 LibriSpeech 設計的數據加載函數
     load_wave,
     add_noise,
-    WhisperDataCollatorWhithPadding,
+    WhisperTextCollatorWhithPadding,
     whisper_optimizer,
     whisper_video_projection_optimizer,
     whisper_flamingo_projection_optimizer,
@@ -28,10 +28,11 @@ from utils import (
     DistributedSamplerWrapper,
 )
 from utils_batch_samplers import LengthBatchSampler
-import soundfile as sf
+import librosa
+from whisper.normalizers.basic import BasicTextNormalizer
 
 # my command
-# python -u whisper_ft_librispeech_text.py config/audio-text/at_en-x_tiny.yaml
+# python -u whisper_ft_librispeech_text.py config/audio-text/at_en_tiny.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -53,6 +54,7 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         self.train = train
         self.noise_snr = noise_snr
         self.translation_base_dir = translation_base_dir
+        self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
         
         print("Dataloader max length : {}".format(max_length))
         print("Loaded {} noise wavs".format(len(self.noise_fn)))
@@ -68,26 +70,38 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         # 構建翻譯文件的路徑
         relative_dir = os.path.relpath(file_dir, '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech')
         trans_file_path = os.path.join(self.translation_base_dir, relative_dir, "{}-{}.trans.txt".format(file_id.split('-')[0], file_id.split('-')[1]))
+        
         # 讀取翻譯文件並提取對應行的翻譯
         translated_text = ""
         if os.path.exists(trans_file_path):
             with open(trans_file_path, 'r', encoding='utf-8') as f:
                 for line in f:
-                    line_id, text = line.strip().split(' ', 1)
+                    parts = line.strip().split(' ', 1)
+                    if len(parts) < 2:  # 如果沒有text，跳過該行
+                        continue
+                    line_id, text = parts
                     if line_id == file_id:
                         translated_text = text
                         break
+                    
         return translated_text
     
     def __getitem__(self, id):
         lang = 'en'
         audio_path, text, _ = self.audio_info_list[id]  # LibriSpeech 使用音頻和文本的二元組
-        wav_data, sample_rate = sf.read(audio_path)  # 使用 soundfile 讀取 FLAC 檔案
+        
+        # 使用 BasicTextNormalizer 正規化文本
+        text = self.text_normalizer(text)
+        
+        # 使用 librosa 讀取音檔
+        wav_data, sample_rate = librosa.load(audio_path, sr=self.sample_rate)
         
         if np.random.rand() > self.noise_prob: # disable noise
-            audio = wav_data.flatten().astype(np.float32) / 32768.0
+            # audio = wav_data.flatten().astype(np.float32) / 32768.0
+            audio = wav_data.flatten().astype(np.float32)
         else: # add noise
-            audio = add_noise(wav_data, self.noise_fn, noise_snr=self.noise_snr).flatten().astype(np.float32) / 32768.0
+            # audio = add_noise(wav_data, self.noise_fn, noise_snr=self.noise_snr).flatten().astype(np.float32) / 32768.0
+            audio = add_noise(wav_data, self.noise_fn, noise_snr=0).flatten().astype(np.float32)
 
         audio_frames = len(audio.flatten()) // 160
         # pad audio to cfg.audio_max_length (longer samples filtered out already)
@@ -188,77 +202,76 @@ class WhisperTextModule(LightningModule):
         return loss
             
     def validation_step(self, batch, batch_id, dataloader_idx=None):
-        print(f"Batch keys: {batch.keys()}")  # 打印出所有的 batch keys
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
         translated_text = batch["translated_text"]
 
-        features_at, x_norm, x_t_norm_pre, x_t_norm_post, x_t = self.model.encoder(input_ids, translated_text, track_norm=True)
-        out_at = self.model.decoder(dec_input_ids, features_at, xv=x_t)
+        features_a, x_norm= self.model.encoder(input_ids, track_norm=True)
+        out_at = self.model.decoder(dec_input_ids, features_a, xv=x_t)
 
-        if cfg.add_gated_x_attn == 0:
-            features_a, x_t = self.model.encoder(input_ids, translated_text, test_a=True)
-            out_a = self.model.decoder(dec_input_ids, features_a)
+        # if cfg.add_gated_x_attn == 0:
+        #     features_a, x_t = self.model.encoder(input_ids, translated_text, test_a=True)
+        #     out_a = self.model.decoder(dec_input_ids, features_a)
 
-            features_t, x_t = self.model.encoder(input_ids, translated_text, test_v=True)
-            out_t = self.model.decoder(dec_input_ids, features_v)
+        #     features_t, x_t = self.model.encoder(input_ids, translated_text, test_v=True)
+        #     out_t = self.model.decoder(dec_input_ids, features_v)
 
-        labels[labels == -100] = self.tokenizer.eot
+        # labels[labels == -100] = self.tokenizer.eot
 
-        mod_list = {"at": out_at, "a": out_a, "t": out_t} if cfg.add_gated_x_attn == 0 else {"at": out_at}
-        for mod, out in mod_list.items():
-            loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
-            # remove all decoder predictions after first eot for proper decoding
-            tokens = torch.argmax(out, dim=2)
+        # mod_list = {"at": out_at, "a": out_a, "t": out_t} if cfg.add_gated_x_attn == 0 else {"at": out_at}
+        # for mod, out in mod_list.items():
+        #     loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
+        #     # remove all decoder predictions after first eot for proper decoding
+        #     tokens = torch.argmax(out, dim=2)
 
-            # Set all decoder predictions after first eot to eot
-            # TODO: fix for large-v3, which predicts <eot> in the beginning
-            eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-            first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find, dim=1, keepdim=True)
-            tokens[torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+        #     # Set all decoder predictions after first eot to eot
+        #     # TODO: fix for large-v3, which predicts <eot> in the beginning
+        #     eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
+        #     first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find, dim=1, keepdim=True)
+        #     tokens[torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
 
-            # calculate next token prediction, not include lang tag, task, and no timestamps token
-            mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
-            n_correct = torch.sum(
-                tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
-            )
-            total = torch.sum(mask)
-            acc = n_correct.item()  / (total.item() + 1e-6)
-            acc = acc if acc < 1 else 0
+        #     # calculate next token prediction, not include lang tag, task, and no timestamps token
+        #     mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
+        #     n_correct = torch.sum(
+        #         tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
+        #     )
+        #     total = torch.sum(mask)
+        #     acc = n_correct.item()  / (total.item() + 1e-6)
+        #     acc = acc if acc < 1 else 0
 
-            o_list, o_list_full, l_list, l_list_full = [], [], [], []
-            for o, l in zip(tokens, labels):
-                o_list.append(self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set]))
-                # o_list_full.append(self.tokenizer.decode(o))
-                l_list.append(self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set]))
-                # l_list_full.append(self.tokenizer.decode(l))
-            wer, cer = wer_cer(hypo=o_list, ref=l_list)
+        #     o_list, o_list_full, l_list, l_list_full = [], [], [], []
+        #     for o, l in zip(tokens, labels):
+        #         o_list.append(self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set]))
+        #         # o_list_full.append(self.tokenizer.decode(o))
+        #         l_list.append(self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set]))
+        #         # l_list_full.append(self.tokenizer.decode(l))
+        #     wer, cer = wer_cer(hypo=o_list, ref=l_list)
         
-            # for i, (hypo, hypo_full, ref, ref_full) in enumerate(zip(o_list, o_list_full, l_list, l_list_full)):
-            print("Mod: {}".format(mod))
-            for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
-                print("-"*10)
-                print("PRED: {}".format(hypo))
-                # print(hypo_full)
-                print("REF:  {}".format(ref))
-                # print(ref_full)
-                if i == 1: break
+        #     # for i, (hypo, hypo_full, ref, ref_full) in enumerate(zip(o_list, o_list_full, l_list, l_list_full)):
+        #     print("Mod: {}".format(mod))
+        #     for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
+        #         print("-"*10)
+        #         print("PRED: {}".format(hypo))
+        #         # print(hypo_full)
+        #         print("REF:  {}".format(ref))
+        #         # print(ref_full)
+        #         if i == 1: break
 
-            # log_prefix = 'val' if dataloader_idx == 1 else 'val_noisy_en_babble'
-            log_prefix = {0: 'dev', 1: 'test'}
-            self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("{}/wer_{}".format(log_prefix[dataloader_idx], mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("{}/acc_{}".format(log_prefix[dataloader_idx], mod), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            # if self.cfg.add_gated_x_attn != 0 and dataloader_idx == 1: # only log for clean
-            #     for i in range(0, 24, 6):
-            #         self.log("val/attn_gate_layer_{}".format(i), self.model.decoder.blocks[i].attn_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            #         self.log("val/ff_gate_layer_{}".format(i), self.model.decoder.blocks[i].ff_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)         
-        if dataloader_idx == 3: # only log for val,clean
-            self.log("val/x_norm", x_norm, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("val/x_v_norm_pre", x_v_norm_pre, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("val/x_v_norm_post", x_v_norm_post, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     # log_prefix = 'val' if dataloader_idx == 1 else 'val_noisy_en_babble'
+        #     log_prefix = {0: 'dev', 1: 'test'}
+        #     self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     self.log("{}/wer_{}".format(log_prefix[dataloader_idx], mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     self.log("{}/acc_{}".format(log_prefix[dataloader_idx], mod), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     # if self.cfg.add_gated_x_attn != 0 and dataloader_idx == 1: # only log for clean
+        #     #     for i in range(0, 24, 6):
+        #     #         self.log("val/attn_gate_layer_{}".format(i), self.model.decoder.blocks[i].attn_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     #         self.log("val/ff_gate_layer_{}".format(i), self.model.decoder.blocks[i].ff_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)         
+        # if dataloader_idx == 3: # only log for val,clean
+        #     self.log("val/x_norm", x_norm, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     self.log("val/x_v_norm_pre", x_v_norm_pre, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     self.log("val/x_v_norm_post", x_v_norm_post, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         
         return
        
@@ -295,7 +308,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=length_sorter,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding())
 
     def val_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.__val_dataset, 
@@ -315,7 +328,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=length_sorter,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding())
    
     def test_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.__test_dataset, 
@@ -335,7 +348,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=length_sorter,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
