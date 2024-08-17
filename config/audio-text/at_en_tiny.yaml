@@ -1,5 +1,5 @@
 train_name: whisper
-audio_max_length: 240000 
+audio_max_length: 240000 # 15 sec
 text_max_length: 250 
 accelerator: auto
 weight_decay: 0.01
@@ -11,38 +11,30 @@ precision: 16-mixed
 
 model_name: tiny
 learning_rate: 1.0e-4 
-batch_size: 16
+batch_size: 32
 num_train_steps: 40000
 warmup_steps: 5000
 gradient_accumulation_steps: 1
 
-monitor: 'dev/acc_av' 
+monitor: 'dev/acc_at' 
 noise_prob: 0.0
 noise_snr_train: 0
 # noise_fn: '/data/sls/scratch/roudi/datasets/musan/tsv/all/train.tsv'
 # noise_fn_val: 'noise/babble/lrs3/valid.tsv' # single lrs3 babble mixture
 # noise_fn_test: 'noise/babble/lrs3/test.tsv' # single lrs3 babble mixture
 
-# video_model_ckpt: 'models/large_noise_pt_noise_ft_433h_only_weights.pt'
-# freeze_video_model: True
-# freeze_video_batch_norm_stats: False 
-
 spec_augment: ""
 dropout_rate: 0 
 
 lang: en
-# pt_ckpt: models/whisper_en_tiny.pt
-pt_ckpt: ''
+pt_ckpt: whisper_en_tiny
 resume_training: False
 train_id: whisper-flamingo_en_tiny
 
-# video_projection_train_only: False
-# video_projection_separate_lr: ''
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
-at_fusion: separate 
 
 translation_base_dir: "/share/nas169/jerryyang/corpus/m2m100/"
 log_output_dir: "slurm/train_text_slurm"

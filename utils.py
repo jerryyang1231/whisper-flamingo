@@ -686,7 +686,7 @@ def load_librispeech_data(audio_max_length, text_max_length,
                             continue
 
                         try:
-                            wav_data, sample_rate = librosa.load(audio_path, sr=None)
+                            wav_data, sample_rate = librosa.load(audio_path, sr=16000)
                             audio_length = len(wav_data)
                         except Exception as e:
                             print(f"Error loading audio {audio_path}: {e}")
@@ -708,24 +708,30 @@ def load_librispeech_data(audio_max_length, text_max_length,
     
     return audio_transcript_pair_list
 
-import os
-import librosa
-
 def load_librispeech_data_2(audio_max_length, text_max_length, 
                           librispeech_root="/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech",
                           include_audio_lens=False, reduce_val=None):
     """
     加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
     """
-    audio_transcript_pair_list = {'train': [], 'valid': [], 'test': []}
+    # 修改此處，使其包含四個鍵
+    audio_transcript_pair_list = {
+        'train': [], 
+        'dev-clean': [], 
+        'dev-other': [], 
+        'test-clean': [], 
+        'test-other': []
+    }
+    
+    # 調整 splits 字典以映射到新鍵
     splits = {
         # 'train-clean-100': 'train',
         # 'train-clean-360': 'train',
         # 'train-other-500': 'train',
-        'dev-clean': 'valid',
-        # 'dev-other': 'valid',
-        'test-clean': 'test',
-        # 'test-other': 'test'
+        'dev-clean': 'dev-clean',
+        'dev-other': 'dev-other',
+        'test-clean': 'test-clean',
+        'test-other': 'test-other'
     }
 
     for split, split_name in splits.items():
@@ -739,15 +745,12 @@ def load_librispeech_data_2(audio_max_length, text_max_length,
         for speaker_dir in os.listdir(split_path):
             speaker_path = os.path.join(split_path, speaker_dir)
             
-            # Make sure speaker_path is a directory before proceeding
             if not os.path.isdir(speaker_path):
                 continue
             
             for chapter_dir in os.listdir(speaker_path):
                 chapter_path = os.path.join(speaker_path, chapter_dir)
-                # print(f"Processing chapter directory: {chapter_path}...")
                 
-                # Ensure chapter_path is a directory
                 if not os.path.isdir(chapter_path):
                     continue
                 
@@ -775,7 +778,7 @@ def load_librispeech_data_2(audio_max_length, text_max_length,
                             continue
 
                         try:
-                            wav_data, sample_rate = librosa.load(audio_path, sr=None)
+                            wav_data, sample_rate = librosa.load(audio_path, sr=16000)
                             audio_length = len(wav_data)
                         except Exception as e:
                             print(f"Error loading audio {audio_path}: {e}")
@@ -790,7 +793,7 @@ def load_librispeech_data_2(audio_max_length, text_max_length,
                             audio_transcript_pair_list[split_name].append((audio_path, text))
         
         # Optionally reduce the size of the validation set
-        if split_name == 'valid' and reduce_val is not None:
+        if split_name.startswith('dev') and reduce_val is not None:
             audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
         
         print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")

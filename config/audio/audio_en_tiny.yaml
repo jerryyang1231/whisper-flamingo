@@ -11,16 +11,13 @@ precision: 16-mixed
 
 model_name: tiny  
 learning_rate: 1.25e-5  # small
-batch_size: 16
+batch_size: 32
 num_train_steps: 50000 
 warmup_steps: 1000
 gradient_accumulation_steps: 1
 
 monitor: 'dev/acc'  
 noise_prob: 0.0  
-# noise_fn: ''  
-# noise_fn_val: ''
-# noise_fn_test: ''
 
 spec_augment: "" 
 dropout_rate: 0
@@ -28,7 +25,7 @@ dropout_rate: 0
 lang: en
 resume_training: false
 
-train_id: whisper_en_tiny
+train_id: whisper_en_tiny_split_dataset
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"

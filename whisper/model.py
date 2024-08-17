@@ -141,8 +141,8 @@ class ResidualAttentionBlock(nn.Module):
             )
             self.ff_gate = nn.Parameter(torch.tensor([0.]))  
         
-    def apply_gated_x_attn(self, x, xv):
-        x = x + self.gated_x_attn(self.gated_x_attn_ln(x), xv)[0] * self.attn_gate.tanh()
+    def apply_gated_x_attn(self, x, xt):
+        x = x + self.gated_x_attn(self.gated_x_attn_ln(x), xt)[0] * self.attn_gate.tanh()
         x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
         return x
 
@@ -153,9 +153,10 @@ class ResidualAttentionBlock(nn.Module):
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
         xv: Optional[Tensor] = None,
+        xt: Optional[Tensor] = None,
     ):
         if self.add_gated_x_attn != 0: 
-            x = self.apply_gated_x_attn(x, xv)
+            x = self.apply_gated_x_attn(x, xt)
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         if self.cross_attn:
             x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
@@ -266,7 +267,7 @@ class AudioEncoder(nn.Module):
         if track_norm:
             return x, x_norm
             # return x, x_norm, x_v_norm_pre, x_v_norm_post, x_v
-        return x, x_v
+        return x
 
 class TextDecoder(nn.Module):
     def __init__(
@@ -294,7 +295,7 @@ class TextDecoder(nn.Module):
 
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
-                xv: Optional[Tensor] = None):
+                xv: Optional[Tensor] = None, xt: Optional[Tensor] = None):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens
@@ -307,10 +308,17 @@ class TextDecoder(nn.Module):
             + self.positional_embedding[offset : offset + x.shape[-1]]
         )
         
+        if xt is not None:
+            xt = (
+            self.token_embedding(xt)
+            + self.positional_embedding[offset : offset + xt.shape[-1]]
+            )
+            xt = xt.to(xa.dtype)
+        
         x = x.to(xa.dtype)
 
         for layer, block in enumerate(self.blocks):
-            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xv=xv)
+            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt=xt)
             
         x = self.ln(x)
         logits = (
