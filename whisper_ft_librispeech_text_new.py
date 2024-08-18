@@ -5,7 +5,7 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from scipy.io import wavfile
+# from scipy.io import wavfile
 import pandas as pd
 import whisper
 import argparse
@@ -16,13 +16,13 @@ from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (
-    load_librispeech_data_optimized,  # 使用專門為 LibriSpeech 設計的數據加載函數
+    load_librispeech_data_,  # 使用專門為 LibriSpeech 設計的數據加載函數
     load_wave,
     add_noise,
     WhisperTextCollatorWhithPadding,
     whisper_optimizer,
-    whisper_video_projection_optimizer,
-    whisper_flamingo_projection_optimizer,
+    # whisper_video_projection_optimizer,
+    # whisper_flamingo_projection_optimizer,
     setup_logging_and_checkpoint,
     wer_cer,
     DistributedSamplerWrapper,
@@ -35,7 +35,7 @@ from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
-# python -u whisper_ft_librispeech_text.py config/audio-text/at_en_tiny.yaml
+# python -u whisper_ft_librispeech_text_new.py config/audio-text/at_en_tiny_new.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -60,7 +60,7 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
         
         print("Dataloader max length : {}".format(max_length))
-        print("Loaded {} noise wavs".format(len(self.noise_fn)))
+        # print("Loaded {} noise wavs".format(len(self.noise_fn)))
 
     def __len__(self):
         return len(self.audio_info_list)
@@ -149,7 +149,8 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         }
 
 class WhisperTextModule(LightningModule):
-    def __init__(self, cfg, model_name, lang, train_dataset, val_dataset, test_dataset) -> None:
+    def __init__(self, cfg, model_name, lang, train_dataset, val_dataset_clean, val_dataset_other,
+                test_dataset_clean, test_dataset_other) -> None:
         super().__init__()
         self.model_name = model_name
         print("Loading Whisper model and weights")
@@ -172,7 +173,7 @@ class WhisperTextModule(LightningModule):
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
                 
-        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, task='transcribe')
+        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
 
         # if 'large' in self.model_name: # only decoder training
         #     for p in self.model.encoder.parameters():
@@ -183,8 +184,10 @@ class WhisperTextModule(LightningModule):
         self.cfg = cfg
         self.__train_dataset = train_dataset
         self.train_dataset = train_dataset
-        self.__val_dataset = val_dataset
-        self.__test_dataset = test_dataset
+        self.__val_dataset_clean = val_dataset_clean
+        self.__val_dataset_other = val_dataset_other
+        self.__test_dataset_clean = test_dataset_clean
+        self.__test_dataset_other = test_dataset_other
         self.special_token_set = set(self.tokenizer.special_tokens.values())
 
     def forward(self, x):
@@ -243,9 +246,7 @@ class WhisperTextModule(LightningModule):
             # Set all decoder predictions after first eot to eot
             # TODO: fix for large-v3, which predicts <eot> in the beginning
             eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-            # first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find, dim=1, keepdim=True)
-            # tokens[torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
-            
+                        
             # 針對每個序列進行檢查
             for i in range(eot_find.shape[0]):
                 if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
@@ -280,7 +281,7 @@ class WhisperTextModule(LightningModule):
                 if i == 1: break
             
             # log_prefix = 'val' if dataloader_idx == 1 else 'val_noisy_en_babble'
-            log_prefix = {0: 'dev', 1: 'test'}
+            log_prefix = {0: 'dev-clean', 1: 'dev-other', 2: 'test-clean', 3: 'test-other'}
             self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/wer_{}".format(log_prefix[dataloader_idx], mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
@@ -314,7 +315,6 @@ class WhisperTextModule(LightningModule):
                                       max_length=None,
                                       spec_augment=self.cfg.spec_augment,
                                       noise_prob=cfg.noise_prob,
-                                    #   noise_fn=cfg.noise_fn,
                                       train=True,
                                       noise_snr=cfg.noise_snr_train,
                                       translation_base_dir=cfg.translation_base_dir)  
@@ -332,7 +332,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=WhisperTextCollatorWhithPadding())
 
     def val_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.__val_dataset, 
+        dataset = LibriSpeechTextDataset(self.__val_dataset_clean,
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -342,7 +342,7 @@ class WhisperTextModule(LightningModule):
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
         length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[i[2] for i in self.__val_dataset],
+                            shapes=[i[2] for i in self.__val_dataset_clean],
                             sort_in_batch='descending',
                             sort_batch='descending',
                             drop_last=False)
@@ -351,8 +351,8 @@ class WhisperTextModule(LightningModule):
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
    
-    def test_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.__test_dataset, 
+    def val_dataloader_other(self):
+        dataset = LibriSpeechTextDataset(self.__val_dataset_other,
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -362,7 +362,47 @@ class WhisperTextModule(LightningModule):
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
         length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[i[2] for i in self.__test_dataset],
+                            shapes=[i[2] for i in self.__val_dataset_other],
+                            sort_in_batch='descending',
+                            sort_batch='descending',
+                            drop_last=False)
+        return torch.utils.data.DataLoader(dataset,
+                          batch_sampler=length_sorter,
+                          num_workers=self.cfg.num_worker,
+                          collate_fn=WhisperTextCollatorWhithPadding())
+    
+    def test_dataloader_clean(self):
+        dataset = LibriSpeechTextDataset(self.__test_dataset_clean, 
+                                self.tokenizer, 
+                                SAMPLE_RATE,
+                                self.model_name,
+                                max_length=None,
+                                spec_augment=False,
+                                noise_prob=0,
+                                train=False,
+                                translation_base_dir=cfg.translation_base_dir)
+        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
+                            shapes=[i[2] for i in self.__test_dataset_clean],
+                            sort_in_batch='descending',
+                            sort_batch='descending',
+                            drop_last=False)
+        return torch.utils.data.DataLoader(dataset,
+                          batch_sampler=length_sorter,
+                          num_workers=self.cfg.num_worker,
+                          collate_fn=WhisperTextCollatorWhithPadding())
+    
+    def test_dataloader_other(self):
+        dataset = LibriSpeechTextDataset(self.__test_dataset_other, 
+                                self.tokenizer, 
+                                SAMPLE_RATE,
+                                self.model_name,
+                                max_length=None,
+                                spec_augment=False,
+                                noise_prob=0,
+                                train=False,
+                                translation_base_dir=cfg.translation_base_dir)
+        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
+                            shapes=[i[2] for i in self.__test_dataset_other],
                             sort_in_batch='descending',
                             sort_batch='descending',
                             drop_last=False)
@@ -381,11 +421,11 @@ if __name__ == "__main__":
     print("audio max length: {}".format(cfg.audio_max_length))
 
     # Initialize WandB
-    wandb.init(project="whisper-flamingo",
-            config=cfg,
-            # name="whisper-flamingo train librispeech with text",
-            name="debug"
-    )
+    # wandb.init(project="whisper-flamingo",
+    #         config=cfg,
+    #         # name="whisper-flamingo train librispeech with text",
+    #         name="debug"
+    # )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
                                                                                 cfg.check_output_dir, 
@@ -394,15 +434,17 @@ if __name__ == "__main__":
                                                                                 cfg.monitor,)
         
     # 使用 LibriSpeech 數據集
-    audio_transcript_pair_list = load_librispeech_data_optimized(cfg.audio_max_length, cfg.text_max_length, include_audio_lens=True)
+    audio_transcript_pair_list = load_librispeech_data_(cfg.audio_max_length, cfg.text_max_length, include_audio_lens=True)
 
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang, 
-                               audio_transcript_pair_list['train'], 
-                               audio_transcript_pair_list['valid'],
-                               audio_transcript_pair_list['test'])
+                            audio_transcript_pair_list['train'], 
+                            audio_transcript_pair_list['dev-clean'],
+                            audio_transcript_pair_list['dev-other'],
+                            audio_transcript_pair_list['test-clean'],
+                            audio_transcript_pair_list['test-other'])
 
     # Create a WandB logger instance
-    wandb_logger = WandbLogger()
+    # wandb_logger = WandbLogger()
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -411,8 +453,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
-        logger=wandb_logger, 
+        logger=tflogger,
+        # logger=[tflogger, wandb_logger],
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
@@ -429,10 +471,13 @@ if __name__ == "__main__":
     print(cfg)
     resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
-        trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.test_dataloader_clean()])
+        trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                                model.test_dataloader_clean(), model.test_dataloader_other()])
     else:
-        # trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.test_dataloader_clean()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.test_dataloader_clean()])
+        trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                                model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                            # model.test_dataloader_clean(), model.test_dataloader_other()])
 
     # End the WandB run
-    wandb.finish()
+    # wandb.finish()

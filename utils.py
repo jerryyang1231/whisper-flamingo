@@ -621,14 +621,109 @@ class DatasetFromSampler(Dataset):
 
 import os
 import librosa
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def load_librispeech_data(audio_max_length, text_max_length, 
                           librispeech_root="/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech",
-                          include_audio_lens=False, reduce_val=None):
+                          include_audio_lens=False, reduce_val=None, max_workers=16):
     """
     加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
     """
+    # 修改此處，使其包含四個鍵
+    audio_transcript_pair_list = {
+        'train': [], 
+        'dev-clean': [], 
+        'dev-other': [], 
+        'test-clean': [], 
+        'test-other': []
+    }
+    
+    # 調整 splits 字典以映射到新鍵
+    splits = {
+        'train-clean-100': 'train',
+        'train-clean-360': 'train',
+        'train-other-500': 'train',
+        'dev-clean': 'dev-clean',
+        'dev-other': 'dev-other',
+        'test-clean': 'test-clean',
+        'test-other': 'test-other'
+    }
+
+    for split, split_name in splits.items():
+        split_path = os.path.join(librispeech_root, split)
+        print(f"Processing split: {split}...")
+        
+        if not os.path.exists(split_path) or not os.path.isdir(split_path):
+            print(f"Skip non-existing or non-directory path: {split_path}")
+            continue
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for speaker_dir in os.listdir(split_path):
+                speaker_path = os.path.join(split_path, speaker_dir)
+                if not os.path.isdir(speaker_path):
+                    continue
+                
+                for chapter_dir in os.listdir(speaker_path):
+                    chapter_path = os.path.join(speaker_path, chapter_dir)
+                    if not os.path.isdir(chapter_path):
+                        continue
+                    
+                    transcript_file = os.path.join(chapter_path, f"{speaker_dir}-{chapter_dir}.trans.txt")
+                    if not os.path.exists(transcript_file):
+                        print(f"Missing transcript file: {transcript_file}")
+                        continue
+
+                    transcripts = {}
+                    with open(transcript_file, 'r') as file:
+                        for line in file:
+                            parts = line.strip().split(maxsplit=1)
+                            if len(parts) == 2:
+                                file_id, transcription = parts
+                                transcripts[file_id] = transcription
+
+                    for audio_file in os.listdir(chapter_path):
+                        if audio_file.endswith('.flac'):
+                            futures.append(executor.submit(process_audio_file, audio_file, chapter_path, transcripts, text_max_length, audio_max_length, include_audio_lens))
+                
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    audio_transcript_pair_list[split_name].append(result)
+            
+        # Optionally reduce the size of the validation set
+        if split_name.startswith('dev') and reduce_val is not None:
+            audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
+        
+        print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
+    
+    return audio_transcript_pair_list
+
+def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, audio_max_length, include_audio_lens):
+    file_id = audio_file.split('.')[0]
+    audio_path = os.path.join(chapter_path, audio_file)
+    text = transcripts.get(file_id, '')
+    
+    if len(text) > text_max_length:
+        return None
+
+    try:
+        wav_data, sample_rate = librosa.load(audio_path, sr=16000)
+        audio_length = len(wav_data)
+    except Exception as e:
+        print(f"Error loading audio {audio_path}: {e}")
+        return None
+    
+    if audio_length > audio_max_length:
+        return None
+
+    return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
+
+def load_librispeech_data_optimized(audio_max_length, text_max_length, 
+                                    librispeech_root="/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech", 
+                                    include_audio_lens=False, reduce_val=None, max_workers=16):
     audio_transcript_pair_list = {'train': [], 'valid': [], 'test': []}
+    
     splits = {
         'train-clean-100': 'train',
         'train-clean-360': 'train',
@@ -646,61 +741,41 @@ def load_librispeech_data(audio_max_length, text_max_length,
         if not os.path.exists(split_path) or not os.path.isdir(split_path):
             print(f"Skip non-existing or non-directory path: {split_path}")
             continue
-        
-        for speaker_dir in os.listdir(split_path):
-            speaker_path = os.path.join(split_path, speaker_dir)
-            
-            # Make sure speaker_path is a directory before proceeding
-            if not os.path.isdir(speaker_path):
-                continue
-            
-            for chapter_dir in os.listdir(speaker_path):
-                chapter_path = os.path.join(speaker_path, chapter_dir)
-                # print(f"Processing chapter directory: {chapter_path}...")
-                
-                # Ensure chapter_path is a directory
-                if not os.path.isdir(chapter_path):
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for speaker_dir in os.listdir(split_path):
+                speaker_path = os.path.join(split_path, speaker_dir)
+                if not os.path.isdir(speaker_path):
                     continue
                 
-                transcript_file = os.path.join(chapter_path, f"{speaker_dir}-{chapter_dir}.trans.txt")
-                
-                if not os.path.exists(transcript_file):
-                    print(f"Missing transcript file: {transcript_file}")
-                    continue
+                for chapter_dir in os.listdir(speaker_path):
+                    chapter_path = os.path.join(speaker_path, chapter_dir)
+                    if not os.path.isdir(chapter_path):
+                        continue
+                    
+                    transcript_file = os.path.join(chapter_path, f"{speaker_dir}-{chapter_dir}.trans.txt")
+                    if not os.path.exists(transcript_file):
+                        print(f"Missing transcript file: {transcript_file}")
+                        continue
 
-                transcripts = {}
-                with open(transcript_file, 'r') as file:
-                    for line in file:
-                        parts = line.strip().split(maxsplit=1)
-                        if len(parts) == 2:
-                            file_id, transcription = parts
-                            transcripts[file_id] = transcription
+                    transcripts = {}
+                    with open(transcript_file, 'r') as file:
+                        for line in file:
+                            parts = line.strip().split(maxsplit=1)
+                            if len(parts) == 2:
+                                file_id, transcription = parts
+                                transcripts[file_id] = transcription
 
-                for audio_file in os.listdir(chapter_path):
-                    if audio_file.endswith('.flac'):
-                        file_id = audio_file.split('.')[0]
-                        audio_path = os.path.join(chapter_path, audio_file)
-                        text = transcripts.get(file_id, '')
-                        
-                        if len(text) > text_max_length:
-                            continue
+                    for audio_file in os.listdir(chapter_path):
+                        if audio_file.endswith('.flac'):
+                            futures.append(executor.submit(process_audio_file, audio_file, chapter_path, transcripts, text_max_length, audio_max_length, include_audio_lens))
+            
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    audio_transcript_pair_list[split_name].append(result)
 
-                        try:
-                            wav_data, sample_rate = librosa.load(audio_path, sr=16000)
-                            audio_length = len(wav_data)
-                        except Exception as e:
-                            print(f"Error loading audio {audio_path}: {e}")
-                            continue
-                        
-                        if audio_length > audio_max_length:
-                            continue
-
-                        if include_audio_lens:
-                            audio_transcript_pair_list[split_name].append((audio_path, text, audio_length))
-                        else:
-                            audio_transcript_pair_list[split_name].append((audio_path, text))
-        
-        # Optionally reduce the size of the validation set
         if split_name == 'valid' and reduce_val is not None:
             audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
         
@@ -708,13 +783,16 @@ def load_librispeech_data(audio_max_length, text_max_length,
     
     return audio_transcript_pair_list
 
-def load_librispeech_data_2(audio_max_length, text_max_length, 
-                          librispeech_root="/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech",
-                          include_audio_lens=False, reduce_val=None):
+import librosa
+from datasets import load_dataset
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def load_librispeech_data_(audio_max_length, text_max_length, 
+                          include_audio_lens=False, reduce_val=None, max_workers=16):
     """
     加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
     """
-    # 修改此處，使其包含四個鍵
+    
     audio_transcript_pair_list = {
         'train': [], 
         'dev-clean': [], 
@@ -723,75 +801,33 @@ def load_librispeech_data_2(audio_max_length, text_max_length,
         'test-other': []
     }
     
-    # 調整 splits 字典以映射到新鍵
+    # 使用 Hugging Face 的 datasets 加載數據
+    dataset_dict = load_dataset("librispeech_asr")
+
     splits = {
-        # 'train-clean-100': 'train',
-        # 'train-clean-360': 'train',
-        # 'train-other-500': 'train',
-        'dev-clean': 'dev-clean',
-        'dev-other': 'dev-other',
-        'test-clean': 'test-clean',
-        'test-other': 'test-other'
+        'train-clean-100': 'train',
+        'train-clean-360': 'train',
+        'train-other-500': 'train',
+        'validation.clean': 'dev-clean',
+        'validation.other': 'dev-other',
+        'test.clean': 'test-clean',
+        'test.other': 'test-other'
     }
 
-    for split, split_name in splits.items():
-        split_path = os.path.join(librispeech_root, split)
-        print(f"Processing split: {split}...")
+    for hf_split, split_name in splits.items():
+        print(f"Processing split: {hf_split}...")
+        dataset = dataset_dict[hf_split]
         
-        if not os.path.exists(split_path) or not os.path.isdir(split_path):
-            print(f"Skip non-existing or non-directory path: {split_path}")
-            continue
-        
-        for speaker_dir in os.listdir(split_path):
-            speaker_path = os.path.join(split_path, speaker_dir)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for item in dataset:
+                futures.append(executor.submit(process_audio_file, item, text_max_length, audio_max_length, include_audio_lens))
+                
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    audio_transcript_pair_list[split_name].append(result)
             
-            if not os.path.isdir(speaker_path):
-                continue
-            
-            for chapter_dir in os.listdir(speaker_path):
-                chapter_path = os.path.join(speaker_path, chapter_dir)
-                
-                if not os.path.isdir(chapter_path):
-                    continue
-                
-                transcript_file = os.path.join(chapter_path, f"{speaker_dir}-{chapter_dir}.trans.txt")
-                
-                if not os.path.exists(transcript_file):
-                    print(f"Missing transcript file: {transcript_file}")
-                    continue
-
-                transcripts = {}
-                with open(transcript_file, 'r') as file:
-                    for line in file:
-                        parts = line.strip().split(maxsplit=1)
-                        if len(parts) == 2:
-                            file_id, transcription = parts
-                            transcripts[file_id] = transcription
-
-                for audio_file in os.listdir(chapter_path):
-                    if audio_file.endswith('.flac'):
-                        file_id = audio_file.split('.')[0]
-                        audio_path = os.path.join(chapter_path, audio_file)
-                        text = transcripts.get(file_id, '')
-                        
-                        if len(text) > text_max_length:
-                            continue
-
-                        try:
-                            wav_data, sample_rate = librosa.load(audio_path, sr=16000)
-                            audio_length = len(wav_data)
-                        except Exception as e:
-                            print(f"Error loading audio {audio_path}: {e}")
-                            continue
-                        
-                        if audio_length > audio_max_length:
-                            continue
-
-                        if include_audio_lens:
-                            audio_transcript_pair_list[split_name].append((audio_path, text, audio_length))
-                        else:
-                            audio_transcript_pair_list[split_name].append((audio_path, text))
-        
         # Optionally reduce the size of the validation set
         if split_name.startswith('dev') and reduce_val is not None:
             audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
@@ -799,3 +835,24 @@ def load_librispeech_data_2(audio_max_length, text_max_length,
         print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
     
     return audio_transcript_pair_list
+
+def process_audio_file_(item, text_max_length, audio_max_length, include_audio_lens):
+    text = item['text']
+    
+    if len(text) > text_max_length:
+        return None
+
+    try:
+        # Hugging Face 已經提供了解碼的音頻數據
+        audio_array = item['audio']['array']
+        sample_rate = item['audio']['sampling_rate']
+        audio_length = len(audio_array)
+    except Exception as e:
+        print(f"Error processing audio: {e}")
+        return None
+    
+    if audio_length > audio_max_length:
+        return None
+
+    audio_path = item['audio']['path']  # 使用 Hugging Face 提供的路徑（已經緩存）
+    return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)

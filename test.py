@@ -85,8 +85,9 @@
 # output = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
 # print("translated result :", output)
 
-import whisper
-import os
+from datasets import load_dataset
 
-print(whisper.__file__)
+# 加載數據集的 "clean" 子集
+dataset = load_dataset("librispeech_asr", "clean", split="train.100")
+
 
