@@ -12,16 +12,13 @@ precision: 16-mixed
 model_name: tiny
 learning_rate: 1.0e-4 
 batch_size: 32
-num_train_steps: 40000
+num_train_steps: 20000
 warmup_steps: 5000
 gradient_accumulation_steps: 1
 
 monitor: 'dev/acc_at'  
 noise_prob: 0.0
 noise_snr_train: 0
-# noise_fn: '/data/sls/scratch/roudi/datasets/musan/tsv/all/train.tsv'
-# noise_fn_val: 'noise/babble/lrs3/valid.tsv' # single lrs3 babble mixture
-# noise_fn_test: 'noise/babble/lrs3/test.tsv' # single lrs3 babble mixture
 
 spec_augment: ""
 dropout_rate: 0 
@@ -29,7 +26,7 @@ dropout_rate: 0
 lang: en
 pt_ckpt: whisper_en_tiny
 resume_training: False
-train_id: whisper-flamingo_en_tiny
+train_id: whisper-flamingo_en_tiny_whisper_flamingo_optimizer
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 

@@ -21,8 +21,7 @@ from utils import (
     add_noise,
     WhisperTextCollatorWhithPadding,
     whisper_optimizer,
-    whisper_video_projection_optimizer,
-    whisper_flamingo_projection_optimizer,
+    whisper_flamingo_optimizer,
     setup_logging_and_checkpoint,
     wer_cer,
     DistributedSamplerWrapper,
@@ -60,7 +59,6 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
         
         print("Dataloader max length : {}".format(max_length))
-        print("Loaded {} noise wavs".format(len(self.noise_fn)))
 
     def __len__(self):
         return len(self.audio_info_list)
@@ -243,8 +241,6 @@ class WhisperTextModule(LightningModule):
             # Set all decoder predictions after first eot to eot
             # TODO: fix for large-v3, which predicts <eot> in the beginning
             eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-            # first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find, dim=1, keepdim=True)
-            # tokens[torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
             
             # 針對每個序列進行檢查
             for i in range(eot_find.shape[0]):
@@ -295,10 +291,13 @@ class WhisperTextModule(LightningModule):
             self.log("val/x_v_norm_post", x_v_norm_post, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         
         return
-       
+    
     def configure_optimizers(self):
         model = self.model
-        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)
+        if self.cfg.add_gated_x_attn != 0:
+            optimizer, scheduler = whisper_flamingo_optimizer(model, self.cfg, self.t_total)
+        else:
+            optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)
         self.optimizer, self.scheduler = optimizer, scheduler
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
@@ -314,7 +313,6 @@ class WhisperTextModule(LightningModule):
                                       max_length=None,
                                       spec_augment=self.cfg.spec_augment,
                                       noise_prob=cfg.noise_prob,
-                                    #   noise_fn=cfg.noise_fn,
                                       train=True,
                                       noise_snr=cfg.noise_snr_train,
                                       translation_base_dir=cfg.translation_base_dir)  
@@ -383,8 +381,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            # name="whisper-flamingo train librispeech with text",
-            name="debug"
+            name="whisper-flamingo train librispeech with text",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
@@ -400,7 +397,7 @@ if __name__ == "__main__":
                                audio_transcript_pair_list['train'], 
                                audio_transcript_pair_list['valid'],
                                audio_transcript_pair_list['test'])
-
+    
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
     
@@ -411,8 +408,7 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
-        logger=wandb_logger, 
+        logger=[tflogger, wandb_logger],
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,

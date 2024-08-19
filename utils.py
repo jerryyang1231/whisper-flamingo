@@ -471,6 +471,33 @@ def whisper_flamingo_projection_optimizer(model, cfg, t_total):
     )
     return optimizer, scheduler
 
+def whisper_flamingo_optimizer(model, cfg, t_total):
+    x_attn = ["gated_x_attn", "attn_gate", "ff"]
+    
+    # 列印出所有被優化器選中的參數名稱
+    selected_params = [n for n, p in model.named_parameters() if any(nd in n for nd in x_attn )]
+    print("Parameters being optimized:")
+    for name in selected_params:
+        print(name)
+        
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters()
+                        if any(nd in n for nd in x_attn )],
+            "lr": cfg.learning_rate,
+        },
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters,
+                        lr=cfg.learning_rate,
+                        eps=cfg.adam_epsilon,
+                        weight_decay=cfg.weight_decay)
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=cfg.warmup_steps,
+        num_training_steps=t_total
+    )
+    return optimizer, scheduler
+
 def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, train_id, monitor='val/acc'):
     Path(log_output_dir).mkdir(exist_ok=True)
     Path(check_output_dir).mkdir(exist_ok=True)
@@ -787,7 +814,7 @@ import librosa
 from datasets import load_dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def load_librispeech_data_(audio_max_length, text_max_length, 
+def load_librispeech_data_from_hugging_face(audio_max_length, text_max_length, 
                           include_audio_lens=False, reduce_val=None, max_workers=16):
     """
     加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
@@ -805,14 +832,14 @@ def load_librispeech_data_(audio_max_length, text_max_length,
     dataset_dict = load_dataset("librispeech_asr")
 
     splits = {
-        'train-clean-100': 'train',
-        'train-clean-360': 'train',
-        'train-other-500': 'train',
-        'validation.clean': 'dev-clean',
-        'validation.other': 'dev-other',
-        'test.clean': 'test-clean',
-        'test.other': 'test-other'
-    }
+    'train.clean.100': 'train',
+    'train.clean.360': 'train',
+    'train.other.500': 'train',
+    'validation.clean': 'dev-clean',
+    'validation.other': 'dev-other',
+    'test.clean': 'test-clean',
+    'test.other': 'test-other'
+}
 
     for hf_split, split_name in splits.items():
         print(f"Processing split: {hf_split}...")
@@ -821,7 +848,7 @@ def load_librispeech_data_(audio_max_length, text_max_length,
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for item in dataset:
-                futures.append(executor.submit(process_audio_file, item, text_max_length, audio_max_length, include_audio_lens))
+                futures.append(executor.submit(process_audio_file__, item, text_max_length, audio_max_length, include_audio_lens))
                 
             for future in as_completed(futures):
                 result = future.result()
@@ -836,7 +863,7 @@ def load_librispeech_data_(audio_max_length, text_max_length,
     
     return audio_transcript_pair_list
 
-def process_audio_file_(item, text_max_length, audio_max_length, include_audio_lens):
+def process_audio_file__(item, text_max_length, audio_max_length, include_audio_lens):
     text = item['text']
     
     if len(text) > text_max_length:
@@ -856,3 +883,50 @@ def process_audio_file_(item, text_max_length, audio_max_length, include_audio_l
 
     audio_path = item['audio']['path']  # 使用 Hugging Face 提供的路徑（已經緩存）
     return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
+
+def load_librispeech_data_from_hugging_face_for_old_data_split(audio_max_length, text_max_length, 
+                          include_audio_lens=False, reduce_val=None, max_workers=16):
+    """
+    加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
+    """
+    
+    audio_transcript_pair_list = {
+        'train': [], 
+        'valid': [], 
+        'test': [], 
+    }
+    
+    # 使用 Hugging Face 的 datasets 加載數據
+    dataset_dict = load_dataset("librispeech_asr")
+
+    splits = {
+    # 'train.clean.100': 'train',
+    # 'train.clean.360': 'train',
+    # 'train.other.500': 'train',
+    'validation.clean': 'valid',
+    # 'validation.other': 'valid',
+    'test.clean': 'test',
+    # 'test.other': 'test'
+}
+
+    for hf_split, split_name in splits.items():
+        print(f"Processing split: {hf_split}...")
+        dataset = dataset_dict[hf_split]
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for item in dataset:
+                futures.append(executor.submit(process_audio_file__, item, text_max_length, audio_max_length, include_audio_lens))
+                
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    audio_transcript_pair_list[split_name].append(result)
+            
+        # Optionally reduce the size of the validation set
+        if split_name.startswith('dev') and reduce_val is not None:
+            audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
+        
+        print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
+    
+    return audio_transcript_pair_list

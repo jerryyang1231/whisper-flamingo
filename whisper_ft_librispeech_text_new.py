@@ -16,13 +16,12 @@ from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (
-    load_librispeech_data_,  # 使用專門為 LibriSpeech 設計的數據加載函數
+    load_librispeech_data_from_hugging_face,  # 使用專門為 LibriSpeech 設計的數據加載函數
     load_wave,
     add_noise,
     WhisperTextCollatorWhithPadding,
     whisper_optimizer,
-    # whisper_video_projection_optimizer,
-    # whisper_flamingo_projection_optimizer,
+    whisper_flamingo_optimizer,
     setup_logging_and_checkpoint,
     wer_cer,
     DistributedSamplerWrapper,
@@ -92,13 +91,18 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
     def __getitem__(self, id):
         lang = 'en'
         lang_tr = 'zh'
-        audio_path, text, _ = self.audio_info_list[id]  # LibriSpeech 使用音頻和文本的二元組
+        # audio_path, text, _ = self.audio_info_list[id]  # LibriSpeech 使用音頻和文本的二元組
+        item = self.audio_info_list[id]  # 現在 `item` 是從 Hugging Face 數據集中得到的 dict
+        
+        # 提取音頻數據和文本
+        audio_array = item['audio']['array']
+        text = item['text']
         
         # 使用 BasicTextNormalizer 正規化文本
         text = self.text_normalizer(text)
         
         # 使用 librosa 讀取音檔
-        wav_data, sample_rate = librosa.load(audio_path, sr=self.sample_rate)
+        # wav_data, sample_rate = librosa.load(audio_path, sr=self.sample_rate)
         
         if np.random.rand() > self.noise_prob: # disable noise
             audio = wav_data.flatten().astype(np.float32)
@@ -131,7 +135,8 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         
         # 獲取對應的翻譯文本
-        translated_text = self._get_translation_text(audio_path)
+        # translated_text = self._get_translation_text(audio_path)
+        translated_text = self._get_translation_text(item['audio']['path'])  # 使用音頻文件路徑來查找翻譯文本
         translated_text = [self.tokenizer.sot,
                            self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
                            self.tokenizer.transcribe, 
@@ -299,7 +304,10 @@ class WhisperTextModule(LightningModule):
        
     def configure_optimizers(self):
         model = self.model
-        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)
+        if self.cfg.add_gated_x_attn != 0:
+            optimizer, scheduler = whisper_flamingo_optimizer(model, self.cfg, self.t_total)
+        else:
+            optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)
         self.optimizer, self.scheduler = optimizer, scheduler
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
@@ -434,7 +442,7 @@ if __name__ == "__main__":
                                                                                 cfg.monitor,)
         
     # 使用 LibriSpeech 數據集
-    audio_transcript_pair_list = load_librispeech_data_(cfg.audio_max_length, cfg.text_max_length, include_audio_lens=True)
+    audio_transcript_pair_list = load_librispeech_data_from_hugging_face(cfg.audio_max_length, cfg.text_max_length, include_audio_lens=True)
 
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang, 
                             audio_transcript_pair_list['train'], 
