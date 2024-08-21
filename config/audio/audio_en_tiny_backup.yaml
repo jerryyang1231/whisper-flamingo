@@ -1,6 +1,6 @@
 train_name: whisper
 audio_max_length: 480000  # 30 sec
-text_max_length: null
+text_max_length: 350
 accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
@@ -23,9 +23,10 @@ spec_augment: ""
 dropout_rate: 0
 
 lang: en
+pt_ckpt: ''
 resume_training: false
 
-train_id: whisper_en_tiny_adjust_hparams
+train_id: whisper_en_tiny_backup
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"

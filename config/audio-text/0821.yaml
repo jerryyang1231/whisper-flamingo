@@ -1,17 +1,17 @@
 train_name: whisper
-audio_max_length: 160000 # 10 sec
-text_max_length: 350 
+audio_max_length: 480000 # 30 sec
+text_max_length: 350
 accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
 validate_every_n_batches: 1000
-num_devices: 2
+num_devices: 1
 precision: 16-mixed
 
 model_name: tiny
-learning_rate: 1.25e-5  # small
-batch_size: 32
+learning_rate: 1.0e-4 
+batch_size: 16
 num_train_steps: 20000
 warmup_steps: 5000
 gradient_accumulation_steps: 1
@@ -24,10 +24,9 @@ spec_augment: ""
 dropout_rate: 0 
 
 lang: en
-# pt_ckpt: whisper_en_tiny_split_dataset
 pt_ckpt: ''
 resume_training: False
-train_id: whisper-flamingo_en_tiny_split_dataset
+train_id: whisper-flamingo_en_tiny_backup
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 

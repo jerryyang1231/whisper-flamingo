@@ -1,6 +1,6 @@
 train_name: whisper
 audio_max_length: 480000 # 30 sec
-text_max_length: null 
+text_max_length: 350
 accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
@@ -24,9 +24,9 @@ spec_augment: ""
 dropout_rate: 0 
 
 lang: en
-pt_ckpt: ''
+pt_ckpt: 'whisper_en_tiny_backup'
 resume_training: False
-train_id: whisper-flamingo_en_tiny_whisper_flamingo_optimizer
+train_id: whisper-flamingo_en_tiny_backup
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 

@@ -5,7 +5,8 @@ import types
 import numpy as np
 import torch
 from torch import nn
-# from scipy.io import wavfile
+from datasets import load_dataset  # 載入 Hugging Face 的 datasets
+from torch.utils.data import Dataset
 import pandas as pd
 import whisper
 import argparse
@@ -16,7 +17,6 @@ from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (
-    load_librispeech_data_from_hugging_face,  # 使用專門為 LibriSpeech 設計的數據加載函數
     load_wave,
     add_noise,
     WhisperTextCollatorWhithPadding,
@@ -27,25 +27,49 @@ from utils import (
     DistributedSamplerWrapper,
 )
 from utils_batch_samplers import LengthBatchSampler
-import librosa
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
-# python -u whisper_ft_librispeech_text_new.py config/audio-text/at_en_tiny_new.yaml
+# python -u 0821_text.py config/audio-text/0821.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 
-class LibriSpeechTextDataset(torch.utils.data.Dataset):
-    def __init__(self, audio_info_list, tokenizer, sample_rate, model_name, max_length, 
-                 spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0, translation_base_dir=None) -> None:
+class LibriSpeechTextDataset(Dataset):
+    def __init__(self, hf_split, tokenizer, sample_rate, model_name, max_length, 
+                 spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0,
+                 translation_base_dir=None) -> None:
         super().__init__()
-
-        self.audio_info_list = audio_info_list
+       
+        # Hugging Face split 到自定義 split 的映射字典
+        self.split_mapping = {
+            'train.clean.100': 'train-clean-100',
+            'train.clean.360': 'train-clean-360',
+            'train.other.500': 'train-other-500',
+            'validation.clean': 'dev-clean',
+            'validation.other': 'dev-other',
+            'test.clean': 'test-clean',
+            'test.other': 'test-other'
+        }
+        
+        # 保存 Hugging Face 的 split 名稱
+        self.hf_split = hf_split
+        
+        # 針對 train split，分割並對每個部分進行映射
+        if 'train' in hf_split:
+            self.custom_split_names = [
+                self.split_mapping.get(split.strip(), split.strip()) 
+                for split in hf_split.split('+')
+            ]
+        else:
+            self.custom_split_names = [self.split_mapping.get(hf_split, hf_split)]
+        
+        # 直接使用 Hugging Face datasets API 加載數據
+        self.dataset = load_dataset("librispeech_asr", split=hf_split)
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
         self.model_name = model_name
@@ -59,50 +83,50 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
         
         print("Dataloader max length : {}".format(max_length))
-        # print("Loaded {} noise wavs".format(len(self.noise_fn)))
 
     def __len__(self):
-        return len(self.audio_info_list)
-
-    def _get_translation_text(self, audio_path):
-        # 提取音檔的目錄和文件名
-        file_dir = os.path.dirname(audio_path)
-        file_id = os.path.basename(audio_path).replace('.flac', '')
-
-        # 構建翻譯文件的路徑
-        relative_dir = os.path.relpath(file_dir, '/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech')
-        trans_file_path = os.path.join(self.translation_base_dir, relative_dir, "{}-{}.trans.txt".format(file_id.split('-')[0], file_id.split('-')[1]))
+        return len(self.dataset)
+   
+    def _get_translation_text(self, file_id):
         
-        # 讀取翻譯文件並提取對應行的翻譯
+        # 提取 speaker_id 和 chapter_id
+        speaker_id, chapter_id = file_id.split('-')[0], file_id.split('-')[1]
+        
         translated_text = ""
-        if os.path.exists(trans_file_path):
-            with open(trans_file_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split(' ', 1)
-                    if len(parts) < 2:  # 如果沒有text，跳過該行
-                        continue
-                    line_id, text = parts
-                    if line_id == file_id:
-                        translated_text = text
-                        break
-                    
+
+        # 遍歷所有可能的 custom_split_names 來查找對應的翻譯文件
+        for custom_split_name in self.custom_split_names:
+            relative_dir = os.path.join(custom_split_name, speaker_id, chapter_id)
+            trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans.txt")
+            
+            # 讀取翻譯文件並提取對應行的翻譯
+            if os.path.exists(trans_file_path):
+                with open(trans_file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        parts = line.strip().split(' ', 1)
+                        if len(parts) < 2:  # 如果沒有 text，跳過該行
+                            continue
+                        line_id, text = parts
+                        if line_id == file_id:
+                            translated_text = text
+                            break
+                if translated_text:  # 如果找到翻譯文本，停止繼續查找
+                    break
+                
         return translated_text
     
     def __getitem__(self, id):
-        lang = 'en'
-        lang_tr = 'zh'
-        # audio_path, text, _ = self.audio_info_list[id]  # LibriSpeech 使用音頻和文本的二元組
-        item = self.audio_info_list[id]  # 現在 `item` 是從 Hugging Face 數據集中得到的 dict
+        lang, lang_tr = 'en', 'zh'
+        item = self.dataset[id]
         
-        # 提取音頻數據和文本
-        audio_array = item['audio']['array']
+        # 獲取音頻數據和文本
+        wav_data = item['audio']['array']
         text = item['text']
+        wav_lens = len(wav_data)
+        file_id = item['id']
         
         # 使用 BasicTextNormalizer 正規化文本
         text = self.text_normalizer(text)
-        
-        # 使用 librosa 讀取音檔
-        # wav_data, sample_rate = librosa.load(audio_path, sr=self.sample_rate)
         
         if np.random.rand() > self.noise_prob: # disable noise
             audio = wav_data.flatten().astype(np.float32)
@@ -135,8 +159,10 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         
         # 獲取對應的翻譯文本
-        # translated_text = self._get_translation_text(audio_path)
-        translated_text = self._get_translation_text(item['audio']['path'])  # 使用音頻文件路徑來查找翻譯文本
+        translated_text = self._get_translation_text(file_id)
+        
+        # 使用 BasicTextNormalizer 正規化文本
+        translated_text = self.text_normalizer(translated_text)
         translated_text = [self.tokenizer.sot,
                            self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
                            self.tokenizer.transcribe, 
@@ -150,24 +176,25 @@ class LibriSpeechTextDataset(torch.utils.data.Dataset):
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translated_text": translated_text
+            "translated_text": translated_text,
+            "wav_lens": wav_lens
         }
 
 class WhisperTextModule(LightningModule):
-    def __init__(self, cfg, model_name, lang, train_dataset, val_dataset_clean, val_dataset_other,
-                test_dataset_clean, test_dataset_other) -> None:
+    def __init__(self, cfg, model_name, lang, train_split, val_clean_split, val_other_split,
+                 test_clean_split, test_other_split) -> None:
         super().__init__()
         self.model_name = model_name
         print("Loading Whisper model and weights")
         self.model = whisper.load_model(model_name,
                                         device='cpu', # avoid OOM on gpu 0 for distributed
-                                        download_root='/share/nas169/jerryyang/whisper-flamingo/experiments/whisper',
+                                        download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                         dropout_rate=cfg.dropout_rate,
                                         add_gated_x_attn=cfg.add_gated_x_attn,)
-               
+        
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
-            state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt, 'last.ckpt'), map_location=torch.device('cpu'))
+            state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt, 'step-14000-wer=0.0000-acc=0.0000.ckpt'), map_location=torch.device('cpu'))
             state_dict = state_dict['state_dict']
             state_dict_updated = {k[6:]: v  for k, v in state_dict.items()} # remove 'model.'
             print(state_dict_updated.keys())
@@ -187,18 +214,18 @@ class WhisperTextModule(LightningModule):
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
         self.cfg = cfg
-        self.__train_dataset = train_dataset
-        self.train_dataset = train_dataset
-        self.__val_dataset_clean = val_dataset_clean
-        self.__val_dataset_other = val_dataset_other
-        self.__test_dataset_clean = test_dataset_clean
-        self.__test_dataset_other = test_dataset_other
+        self.train_split = train_split
+        self.val_clean_split = val_clean_split
+        self.val_other_split = val_other_split
+        self.test_clean_split = test_clean_split
+        self.test_other_split = test_other_split
         self.special_token_set = set(self.tokenizer.special_tokens.values())
 
     def forward(self, x):
         return self.model(x)
 
     def training_step(self, batch, batch_id):
+        
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
@@ -295,10 +322,10 @@ class WhisperTextModule(LightningModule):
             #     for i in range(0, 24, 6):
             #         self.log("val/attn_gate_layer_{}".format(i), self.model.decoder.blocks[i].attn_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             #         self.log("val/ff_gate_layer_{}".format(i), self.model.decoder.blocks[i].ff_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)         
-        if dataloader_idx == 3: # only log for val,clean
-            self.log("val/x_norm", x_norm, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("val/x_v_norm_pre", x_v_norm_pre, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("val/x_v_norm_post", x_v_norm_post, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        # if dataloader_idx == 3: # only log for val,clean
+        #     self.log("val/x_norm", x_norm, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     self.log("val/x_v_norm_pre", x_v_norm_pre, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        #     self.log("val/x_v_norm_post", x_v_norm_post, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         
         return
        
@@ -316,7 +343,7 @@ class WhisperTextModule(LightningModule):
             self.t_total = self.cfg.num_train_steps
 
     def train_dataloader(self):
-        dataset = LibriSpeechTextDataset(self.__train_dataset, 
+        dataset = LibriSpeechTextDataset(self.train_split, 
                                       self.tokenizer, 
                                       SAMPLE_RATE,
                                       self.model_name,
@@ -327,7 +354,7 @@ class WhisperTextModule(LightningModule):
                                       noise_snr=cfg.noise_snr_train,
                                       translation_base_dir=cfg.translation_base_dir)  
         length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * self.cfg.batch_size),
-                            shapes=[i[2] for i in self.__train_dataset],
+                            shapes=[(item['wav_lens']) for item in dataset],
                             sort_in_batch='descending',
                             sort_batch='shuffle',
                             drop_last=True,)
@@ -340,7 +367,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=WhisperTextCollatorWhithPadding())
 
     def val_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.__val_dataset_clean,
+        dataset = LibriSpeechTextDataset(self.val_clean_split,
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -350,7 +377,7 @@ class WhisperTextModule(LightningModule):
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
         length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[i[2] for i in self.__val_dataset_clean],
+                            shapes=[(item['wav_lens']) for item in dataset],
                             sort_in_batch='descending',
                             sort_batch='descending',
                             drop_last=False)
@@ -360,7 +387,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=WhisperTextCollatorWhithPadding())
    
     def val_dataloader_other(self):
-        dataset = LibriSpeechTextDataset(self.__val_dataset_other,
+        dataset = LibriSpeechTextDataset(self.val_other_split,
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -370,7 +397,7 @@ class WhisperTextModule(LightningModule):
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
         length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[i[2] for i in self.__val_dataset_other],
+                            shapes=[(item['wav_lens']) for item in dataset],
                             sort_in_batch='descending',
                             sort_batch='descending',
                             drop_last=False)
@@ -380,7 +407,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=WhisperTextCollatorWhithPadding())
     
     def test_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.__test_dataset_clean, 
+        dataset = LibriSpeechTextDataset(self.test_clean_split,  
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -390,7 +417,7 @@ class WhisperTextModule(LightningModule):
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
         length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[i[2] for i in self.__test_dataset_clean],
+                            shapes=[(item['wav_lens']) for item in dataset],
                             sort_in_batch='descending',
                             sort_batch='descending',
                             drop_last=False)
@@ -400,7 +427,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=WhisperTextCollatorWhithPadding())
     
     def test_dataloader_other(self):
-        dataset = LibriSpeechTextDataset(self.__test_dataset_other, 
+        dataset = LibriSpeechTextDataset(self.test_other_split, 
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -410,7 +437,7 @@ class WhisperTextModule(LightningModule):
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
         length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[i[2] for i in self.__test_dataset_other],
+                            shapes=[(item['wav_lens']) for item in dataset],
                             sort_in_batch='descending',
                             sort_batch='descending',
                             drop_last=False)
@@ -431,8 +458,7 @@ if __name__ == "__main__":
     # Initialize WandB
     # wandb.init(project="whisper-flamingo",
     #         config=cfg,
-    #         # name="whisper-flamingo train librispeech with text",
-    #         name="debug"
+    #         name="whisper-flamingo train librispeech with text backup",
     # )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
@@ -441,15 +467,12 @@ if __name__ == "__main__":
                                                                                 cfg.train_id,
                                                                                 cfg.monitor,)
         
-    # 使用 LibriSpeech 數據集
-    audio_transcript_pair_list = load_librispeech_data_from_hugging_face(cfg.audio_max_length, cfg.text_max_length, include_audio_lens=True)
-
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang, 
-                            audio_transcript_pair_list['train'], 
-                            audio_transcript_pair_list['dev-clean'],
-                            audio_transcript_pair_list['dev-other'],
-                            audio_transcript_pair_list['test-clean'],
-                            audio_transcript_pair_list['test-other'])
+                            'train.clean.100+train.clean.360+train.other.500',
+                            'validation.clean',
+                            'validation.other',
+                            'test.clean',
+                            'test.other')
 
     # Create a WandB logger instance
     # wandb_logger = WandbLogger()
@@ -484,8 +507,8 @@ if __name__ == "__main__":
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
                                                 model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                            # model.test_dataloader_clean(), model.test_dataloader_other()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                            model.test_dataloader_clean(), model.test_dataloader_other()])
 
     # End the WandB run
     # wandb.finish()

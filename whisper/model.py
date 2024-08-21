@@ -277,7 +277,9 @@ class TextDecoder(nn.Module):
         super().__init__()
 
         self.token_embedding = nn.Embedding(n_vocab, n_state)
-        self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
+        # self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
+        self.positional_embedding_x = nn.Parameter(torch.empty(n_ctx, n_state))  # 專門給 x 的 positional embedding
+        self.positional_embedding_xt = nn.Parameter(torch.empty(n_ctx, n_state))  # 專門給 xt 的 positional embedding
 
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
             [
@@ -302,16 +304,31 @@ class TextDecoder(nn.Module):
         xa : torch.Tensor, shape = (batch_size, n_audio_ctx, n_audio_state)
             the encoded audio features to be attended on
         """
+        
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
+        
+        # x = (
+        #     self.token_embedding(x)
+        #     + self.positional_embedding[offset : offset + x.shape[-1]]
+        # )
+        
         x = (
             self.token_embedding(x)
-            + self.positional_embedding[offset : offset + x.shape[-1]]
+            + self.positional_embedding_x[offset : offset + x.shape[-1]]  # 使用專門的 positional embedding
         )
+        
+        # if xt is not None:
+        #     xt = (
+        #         self.token_embedding(xt)
+        #         + self.positional_embedding[offset : offset + xt.shape[-1]]
+        #     )
+        #     print("xt's shape :", xt.shape)
+        #     xt = xt.to(xa.dtype)
         
         if xt is not None:
             xt = (
-            self.token_embedding(xt)
-            + self.positional_embedding[offset : offset + xt.shape[-1]]
+                self.token_embedding(xt)
+                + self.positional_embedding_xt[offset : offset + xt.shape[-1]]  # 使用專門的 positional embedding
             )
             xt = xt.to(xa.dtype)
         
@@ -321,10 +338,11 @@ class TextDecoder(nn.Module):
             x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt=xt)
             
         x = self.ln(x)
+        
         logits = (
             x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)
         ).float()
-
+        
         return logits
 
 
@@ -352,13 +370,13 @@ class Whisper(nn.Module):
             adapter_dim,
         )
         self.decoder = TextDecoder(
-            self.dims.n_vocab,
-            self.dims.n_text_ctx,
-            self.dims.n_text_state,
-            self.dims.n_text_head,
-            self.dims.n_text_layer,
-            dropout_rate,
-            add_gated_x_attn,
+            n_vocab=self.dims.n_vocab,
+            n_ctx=512,  # 明確使用關鍵字參數傳遞 n_ctx
+            n_state=self.dims.n_text_state,
+            n_head=self.dims.n_text_head,
+            n_layer=self.dims.n_text_layer,
+            dropout_rate=dropout_rate,
+            add_gated_x_attn=add_gated_x_attn,
         )
         # use the last half among the decoder layers for time alignment by default;
         # to use a specific set of heads, see `set_alignment_heads()` below.

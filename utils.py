@@ -286,14 +286,49 @@ class WhisperDataCollatorWhithPadding:
 
         return batch
 
-class WhisperTextCollatorWhithPadding:
+class WhisperDataCollatorWhithPadding_add_wav_lens:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, translated_texts = [], [], [], []
+        input_ids, labels, dec_input_ids, wav_lens = [], [], [], []
+
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
-            translated_texts.append(f["translated_text"])  # 添加這一行
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "wav_lens": wav_lens  # Add wav_lens to the batch
+        }
+
+        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+
+        return batch
+
+
+class WhisperTextCollatorWhithPadding:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, translated_texts, wav_lens = [], [], [], [], []
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            translated_texts.append(f["translated_text"])
+            wav_lens.append(f["wav_lens"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
@@ -316,7 +351,8 @@ class WhisperTextCollatorWhithPadding:
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translated_text": translated_texts  # 添加這一行
+            "translated_text": translated_texts,
+            "wav_lens": wav_lens  # Add wav_lens to the batch
         }
 
         batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
@@ -521,7 +557,7 @@ def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, t
     monitor = monitor.replace('test', 'val') if 'test' in monitor else monitor.replace('val', 'test')
     val_checkpoint = ModelCheckpoint(
         dirpath=f"{check_output_dir}/{train_id}",
-        filename="step-{step:05d}-wer={val/wer:.4f}-acc={val/acc:.4f}",
+        filename="step-{step:05d}-wer={dev-other/wer_at:.4f}-acc={dev-other/acc_at:.4f}",
         monitor=monitor,
         mode='max',
         save_top_k=1,
@@ -542,7 +578,7 @@ def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, t
     #                  val_checkpoint,
     #                  latest_checkpoint, 
     #                  LearningRateMonitor(logging_interval="step")]
-    callback_list = [checkpoint_callback,
+    callback_list = [val_checkpoint,
                      LearningRateMonitor(logging_interval="step")]
     return tflogger, checkpoint_callback, callback_list
 
@@ -731,7 +767,7 @@ def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, a
     audio_path = os.path.join(chapter_path, audio_file)
     text = transcripts.get(file_id, '')
     
-    if len(text) > text_max_length:
+    if text_max_length is not None and len(text) > text_max_length:
         return None
 
     try:
@@ -745,188 +781,3 @@ def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, a
         return None
 
     return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
-
-def load_librispeech_data_optimized(audio_max_length, text_max_length, 
-                                    librispeech_root="/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech", 
-                                    include_audio_lens=False, reduce_val=None, max_workers=16):
-    audio_transcript_pair_list = {'train': [], 'valid': [], 'test': []}
-    
-    splits = {
-        'train-clean-100': 'train',
-        'train-clean-360': 'train',
-        'train-other-500': 'train',
-        'dev-clean': 'valid',
-        'dev-other': 'valid',
-        'test-clean': 'test',
-        'test-other': 'test'
-    }
-
-    for split, split_name in splits.items():
-        split_path = os.path.join(librispeech_root, split)
-        print(f"Processing split: {split}...")
-        
-        if not os.path.exists(split_path) or not os.path.isdir(split_path):
-            print(f"Skip non-existing or non-directory path: {split_path}")
-            continue
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for speaker_dir in os.listdir(split_path):
-                speaker_path = os.path.join(split_path, speaker_dir)
-                if not os.path.isdir(speaker_path):
-                    continue
-                
-                for chapter_dir in os.listdir(speaker_path):
-                    chapter_path = os.path.join(speaker_path, chapter_dir)
-                    if not os.path.isdir(chapter_path):
-                        continue
-                    
-                    transcript_file = os.path.join(chapter_path, f"{speaker_dir}-{chapter_dir}.trans.txt")
-                    if not os.path.exists(transcript_file):
-                        print(f"Missing transcript file: {transcript_file}")
-                        continue
-
-                    transcripts = {}
-                    with open(transcript_file, 'r') as file:
-                        for line in file:
-                            parts = line.strip().split(maxsplit=1)
-                            if len(parts) == 2:
-                                file_id, transcription = parts
-                                transcripts[file_id] = transcription
-
-                    for audio_file in os.listdir(chapter_path):
-                        if audio_file.endswith('.flac'):
-                            futures.append(executor.submit(process_audio_file, audio_file, chapter_path, transcripts, text_max_length, audio_max_length, include_audio_lens))
-            
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    audio_transcript_pair_list[split_name].append(result)
-
-        if split_name == 'valid' and reduce_val is not None:
-            audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
-        
-        print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
-    
-    return audio_transcript_pair_list
-
-import librosa
-from datasets import load_dataset
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-def load_librispeech_data_from_hugging_face(audio_max_length, text_max_length, 
-                          include_audio_lens=False, reduce_val=None, max_workers=16):
-    """
-    加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
-    """
-    
-    audio_transcript_pair_list = {
-        'train': [], 
-        'dev-clean': [], 
-        'dev-other': [], 
-        'test-clean': [], 
-        'test-other': []
-    }
-    
-    # 使用 Hugging Face 的 datasets 加載數據
-    dataset_dict = load_dataset("librispeech_asr")
-
-    splits = {
-    'train.clean.100': 'train',
-    'train.clean.360': 'train',
-    'train.other.500': 'train',
-    'validation.clean': 'dev-clean',
-    'validation.other': 'dev-other',
-    'test.clean': 'test-clean',
-    'test.other': 'test-other'
-}
-
-    for hf_split, split_name in splits.items():
-        print(f"Processing split: {hf_split}...")
-        dataset = dataset_dict[hf_split]
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for item in dataset:
-                futures.append(executor.submit(process_audio_file__, item, text_max_length, audio_max_length, include_audio_lens))
-                
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    audio_transcript_pair_list[split_name].append(result)
-            
-        # Optionally reduce the size of the validation set
-        if split_name.startswith('dev') and reduce_val is not None:
-            audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
-        
-        print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
-    
-    return audio_transcript_pair_list
-
-def process_audio_file__(item, text_max_length, audio_max_length, include_audio_lens):
-    text = item['text']
-    
-    if len(text) > text_max_length:
-        return None
-
-    try:
-        # Hugging Face 已經提供了解碼的音頻數據
-        audio_array = item['audio']['array']
-        sample_rate = item['audio']['sampling_rate']
-        audio_length = len(audio_array)
-    except Exception as e:
-        print(f"Error processing audio: {e}")
-        return None
-    
-    if audio_length > audio_max_length:
-        return None
-
-    audio_path = item['audio']['path']  # 使用 Hugging Face 提供的路徑（已經緩存）
-    return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
-
-def load_librispeech_data_from_hugging_face_for_old_data_split(audio_max_length, text_max_length, 
-                          include_audio_lens=False, reduce_val=None, max_workers=16):
-    """
-    加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
-    """
-    
-    audio_transcript_pair_list = {
-        'train': [], 
-        'valid': [], 
-        'test': [], 
-    }
-    
-    # 使用 Hugging Face 的 datasets 加載數據
-    dataset_dict = load_dataset("librispeech_asr")
-
-    splits = {
-    # 'train.clean.100': 'train',
-    # 'train.clean.360': 'train',
-    # 'train.other.500': 'train',
-    'validation.clean': 'valid',
-    # 'validation.other': 'valid',
-    'test.clean': 'test',
-    # 'test.other': 'test'
-}
-
-    for hf_split, split_name in splits.items():
-        print(f"Processing split: {hf_split}...")
-        dataset = dataset_dict[hf_split]
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for item in dataset:
-                futures.append(executor.submit(process_audio_file__, item, text_max_length, audio_max_length, include_audio_lens))
-                
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    audio_transcript_pair_list[split_name].append(result)
-            
-        # Optionally reduce the size of the validation set
-        if split_name.startswith('dev') and reduce_val is not None:
-            audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
-        
-        print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
-    
-    return audio_transcript_pair_list

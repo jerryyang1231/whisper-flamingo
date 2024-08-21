@@ -12,7 +12,7 @@ precision: 16-mixed
 model_name: tiny  
 learning_rate: 1.25e-5  # small
 batch_size: 16
-num_train_steps: 15000
+num_train_steps: 18000
 warmup_steps: 1000
 gradient_accumulation_steps: 1
 
@@ -23,9 +23,10 @@ spec_augment: ""
 dropout_rate: 0
 
 lang: en
+pt_ckpt: ''
 resume_training: false
 
-train_id: whisper_en_tiny_adjust_hparams
+train_id: whisper_en_tiny_load_data_from_hf_adjust_hparams
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"
