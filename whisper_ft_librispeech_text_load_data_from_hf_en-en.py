@@ -33,7 +33,8 @@ from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
-# python -u whisper_ft_librispeech_text_load_data_from_hf.py config/audio-text/at_en_tiny.yaml
+# python -u same_as_whisper_ft_librispeech_text_load_data_from_hf_but_different_token_sequence.py config/audio-text/without_special_tokens.yaml
+# python -u whisper_ft_librispeech_text_load_data_from_hf_en-en.py config/audio-text/at_en-en_tiny.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -99,16 +100,6 @@ class LibriSpeechTextDataset(Dataset):
         for custom_split_name in self.custom_split_names:
             relative_dir = os.path.join(custom_split_name, speaker_id, chapter_id)
             trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans.txt")
-            bad_trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans_repeated_characters.txt")
-            
-            # 讀取錯誤句子文件
-            bad_lines = set()
-            if os.path.exists(bad_trans_file_path):
-                with open(bad_trans_file_path, 'r', encoding='utf-8') as bad_file:
-                    for line in bad_file:
-                        if line.startswith("Index:"):
-                            bad_line_id = line.split()[1][:-1]  # 提取 Index 後面的行 ID
-                            bad_lines.add(bad_line_id)
             
             # 讀取翻譯文件並提取對應行的翻譯
             if os.path.exists(trans_file_path):
@@ -118,11 +109,6 @@ class LibriSpeechTextDataset(Dataset):
                         if len(parts) < 2:  # 如果沒有 text，跳過該行
                             continue
                         line_id, text = parts
-                        
-                        # 如果行 ID 在錯誤句子文件中，則跳過該行
-                        if line_id in bad_lines:
-                            continue
-                        
                         if line_id == file_id:
                             translated_text = text
                             break
@@ -174,23 +160,26 @@ class LibriSpeechTextDataset(Dataset):
                         self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         
+        translated_text = dec_input_ids
+        
         # 獲取對應的翻譯文本
-        translated_text = self._get_translation_text(file_id)
+        # translated_text = self._get_translation_text(file_id)
         
         # 使用 BasicTextNormalizer 正規化文本
-        translated_text = self.text_normalizer(translated_text)
+        # translated_text = self.text_normalizer(translated_text)
         # translated_text = [self.tokenizer.sot,
-        #                         self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
-        #                         self.tokenizer.transcribe, 
-        #                         self.tokenizer.no_timestamps] + \
-        #                         self.tokenizer.encode(" " + translated_text)
-        translated_text = self.tokenizer.encode(" " + translated_text)
+        #                    self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
+        #                    self.tokenizer.transcribe, 
+        #                    self.tokenizer.no_timestamps] + \
+        #                    self.tokenizer.encode(" " + translated_text)
+        # translated_text = self.tokenizer.encode(" " + translated_text)   
+        
         # 截斷 translated_text 以符合 self.n_ctx 的限制
-        if len(translated_text) > self.n_ctx:
-            translated_text = translated_text[:self.n_ctx]
+        # if len(translated_text) > self.n_ctx:
+        #     translated_text = translated_text[:self.n_ctx]                      
         
         # 將 translated_text 轉換為 NumPy array 並且轉換為 float32
-        translated_text = np.array(translated_text).astype(np.float32)
+        # translated_text = np.array(translated_text).astype(np.float32)
                
         return {
             "input_ids": mel,
@@ -478,7 +467,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisper-flamingo w/o special tokens(audio_max_length=10sec)",
+            name="whisper-flamingo w/ text en-en",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 

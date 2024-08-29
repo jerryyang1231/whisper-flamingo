@@ -509,13 +509,7 @@ def whisper_flamingo_projection_optimizer(model, cfg, t_total):
 
 def whisper_flamingo_optimizer(model, cfg, t_total):
     x_attn = ["gated_x_attn", "attn_gate", "ff"]
-    
-    # 列印出所有被優化器選中的參數名稱
-    selected_params = [n for n, p in model.named_parameters() if any(nd in n for nd in x_attn )]
-    print("Parameters being optimized:")
-    for name in selected_params:
-        print(name)
-        
+           
     optimizer_grouped_parameters = [
         {
             "params": [p for n, p in model.named_parameters()

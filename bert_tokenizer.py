@@ -31,16 +31,17 @@ from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+from transformers import BertTokenizer  # 引入BertTokenizer
 
 # my command
-# python -u whisper_ft_librispeech_text_load_data_from_hf.py config/audio-text/at_en_tiny.yaml
+# python -u bert_tokenizer.py config/audio-text/bert_tokenizer.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 
 class LibriSpeechTextDataset(Dataset):
-    def __init__(self, hf_split, tokenizer, sample_rate, model_name, max_length, 
+    def __init__(self, hf_split, tokenizer, bert_tokenizer, sample_rate, model_name, max_length, 
                  spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0,
                  translation_base_dir=None) -> None:
         super().__init__()
@@ -72,6 +73,7 @@ class LibriSpeechTextDataset(Dataset):
         self.dataset = load_dataset("librispeech_asr", split=hf_split)
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
+        self.bert_tokenizer = bert_tokenizer  
         self.model_name = model_name
         self.max_length = max_length
         self.spec_augment = spec_augment
@@ -179,18 +181,23 @@ class LibriSpeechTextDataset(Dataset):
         
         # 使用 BasicTextNormalizer 正規化文本
         translated_text = self.text_normalizer(translated_text)
+
+        # 使用BERT tokenizer來處理翻譯文本
+        bert_encoded = self.bert_tokenizer(translated_text, padding='max_length', truncation=True, max_length=self.n_ctx, return_tensors='pt')
+        translated_text = bert_encoded['input_ids'].squeeze().numpy().astype(np.float32)
+        
         # translated_text = [self.tokenizer.sot,
         #                         self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
         #                         self.tokenizer.transcribe, 
         #                         self.tokenizer.no_timestamps] + \
         #                         self.tokenizer.encode(" " + translated_text)
-        translated_text = self.tokenizer.encode(" " + translated_text)
+        
         # 截斷 translated_text 以符合 self.n_ctx 的限制
-        if len(translated_text) > self.n_ctx:
-            translated_text = translated_text[:self.n_ctx]
+        # if len(translated_text) > self.n_ctx:
+        #     translated_text = translated_text[:self.n_ctx]
         
         # 將 translated_text 轉換為 NumPy array 並且轉換為 float32
-        translated_text = np.array(translated_text).astype(np.float32)
+        # translated_text = np.array(translated_text).astype(np.float32)
                
         return {
             "input_ids": mel,
@@ -365,6 +372,7 @@ class WhisperTextModule(LightningModule):
     def train_dataloader(self):
         dataset = LibriSpeechTextDataset(self.train_split, 
                                       self.tokenizer, 
+                                      bert_tokenizer,
                                       SAMPLE_RATE,
                                       self.model_name,
                                       max_length=None,
@@ -388,7 +396,8 @@ class WhisperTextModule(LightningModule):
 
     def val_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.val_clean_split,
-                                self.tokenizer, 
+                                self.tokenizer,
+                                bert_tokenizer,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -408,7 +417,8 @@ class WhisperTextModule(LightningModule):
    
     def val_dataloader_other(self):
         dataset = LibriSpeechTextDataset(self.val_other_split,
-                                self.tokenizer, 
+                                self.tokenizer,
+                                bert_tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -428,7 +438,8 @@ class WhisperTextModule(LightningModule):
     
     def test_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.test_clean_split,  
-                                self.tokenizer, 
+                                self.tokenizer,
+                                bert_tokenizer,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -448,7 +459,8 @@ class WhisperTextModule(LightningModule):
     
     def test_dataloader_other(self):
         dataset = LibriSpeechTextDataset(self.test_other_split, 
-                                self.tokenizer, 
+                                self.tokenizer,
+                                bert_tokenizer,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -478,7 +490,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisper-flamingo w/o special tokens(audio_max_length=10sec)",
+            name="whisper-flamingo with bert tokenizer(audio_max_length=10sec)",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
@@ -493,6 +505,9 @@ if __name__ == "__main__":
                             'validation.other',
                             'test.clean',
                             'test.other')
+    
+    # 在實例化時傳入BERT tokenizer
+    bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
@@ -532,3 +547,14 @@ if __name__ == "__main__":
 
     # End the WandB run
     wandb.finish()
+
+# from transformers import BertConfig, BertModel
+
+# # Initializing a BERT google-bert/bert-base-uncased style configuration
+# configuration = BertConfig()
+
+# # Initializing a model (with random weights) from the google-bert/bert-base-uncased style configuration
+# model = BertModel(configuration)
+
+# # Accessing the model configuration
+# configuration = model.config

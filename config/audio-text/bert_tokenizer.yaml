@@ -1,5 +1,5 @@
 train_name: whisper
-audio_max_length: 480000 # 30 sec
+audio_max_length: 160000 # 10 sec
 text_max_length: 350
 accelerator: auto
 weight_decay: 0.01
@@ -10,10 +10,12 @@ num_devices: 1
 precision: 16-mixed
 
 model_name: tiny
-learning_rate: 1.0e-4 
+# learning_rate: 1.0e-4 
+learning_rate: 5.0e-5
 batch_size: 16
-num_train_steps: 20000
-warmup_steps: 5000
+num_train_steps: 60000
+# warmup_steps: 5000
+warmup_steps: 6000
 gradient_accumulation_steps: 1
 
 monitor: 'dev-other/acc_at'  
@@ -24,9 +26,10 @@ spec_augment: ""
 dropout_rate: 0 
 
 lang: en
-pt_ckpt: ''
 resume_training: False
-train_id: whisper-flamingo_en_tiny_backup
+
+pt_ckpt: 'whisper_en_tiny/step-05000-wer=0.0000-acc=0.0000.ckpt'
+train_id: whisper-flamingo_en_tiny_bert_tokenizer
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 

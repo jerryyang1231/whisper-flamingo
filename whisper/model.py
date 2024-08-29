@@ -277,9 +277,7 @@ class TextDecoder(nn.Module):
         super().__init__()
 
         self.token_embedding = nn.Embedding(n_vocab, n_state)
-        # self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
-        self.positional_embedding_x = nn.Parameter(torch.empty(n_ctx, n_state))  # 專門給 x 的 positional embedding
-        self.positional_embedding_xt = nn.Parameter(torch.empty(n_ctx, n_state))  # 專門給 xt 的 positional embedding
+        self.positional_embedding = nn.Parameter(torch.empty(n_ctx, n_state))
 
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
             [
@@ -307,30 +305,28 @@ class TextDecoder(nn.Module):
         
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
         
-        # x = (
-        #     self.token_embedding(x)
-        #     + self.positional_embedding[offset : offset + x.shape[-1]]
-        # )
-        
         x = (
             self.token_embedding(x)
-            + self.positional_embedding_x[offset : offset + x.shape[-1]]  # 使用專門的 positional embedding
+            + self.positional_embedding[offset : offset + x.shape[-1]]
         )
-        
-        # if xt is not None:
-        #     xt = (
-        #         self.token_embedding(xt)
-        #         + self.positional_embedding[offset : offset + xt.shape[-1]]
-        #     )
-        #     print("xt's shape :", xt.shape)
-        #     xt = xt.to(xa.dtype)
         
         if xt is not None:
             xt = (
                 self.token_embedding(xt)
-                + self.positional_embedding_xt[offset : offset + xt.shape[-1]]  # 使用專門的 positional embedding
+                + self.positional_embedding[offset : offset + xt.shape[-1]]
             )
             xt = xt.to(xa.dtype)
+        
+        # if xt is not None:
+        #     if xt.shape[1] > self.positional_embedding.shape[0]:  # 檢查 xt 是否超過 n_ctx
+        #         print(f"Skipping xt processing because its length {xt.shape[1]} exceeds n_ctx {self.positional_embedding.shape[0]}")
+        #         xt = None
+        #     else:
+        #         xt = (
+        #             self.token_embedding(xt)
+        #             + self.positional_embedding[offset : offset + xt.shape[-1]]
+        #         )
+        #         xt = xt.to(xa.dtype)
         
         x = x.to(xa.dtype)
 
@@ -370,13 +366,13 @@ class Whisper(nn.Module):
             adapter_dim,
         )
         self.decoder = TextDecoder(
-            n_vocab=self.dims.n_vocab,
-            n_ctx=512,  # 明確使用關鍵字參數傳遞 n_ctx
-            n_state=self.dims.n_text_state,
-            n_head=self.dims.n_text_head,
-            n_layer=self.dims.n_text_layer,
-            dropout_rate=dropout_rate,
-            add_gated_x_attn=add_gated_x_attn,
+            self.dims.n_vocab,
+            self.dims.n_text_ctx,
+            self.dims.n_text_state,
+            self.dims.n_text_head,
+            self.dims.n_text_layer,
+            dropout_rate,
+            add_gated_x_attn,
         )
         # use the last half among the decoder layers for time alignment by default;
         # to use a specific set of heads, see `set_alignment_heads()` below.

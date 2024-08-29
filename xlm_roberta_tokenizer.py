@@ -31,16 +31,18 @@ from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+from transformers import BertTokenizer  
+from transformers import XLMRobertaTokenizer
 
 # my command
-# python -u 0821_text.py config/audio-text/0821.yaml
+# python -u xlm_roberta_tokenizer.py config/audio-text/xlm_roberta_tokenizer.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 
 class LibriSpeechTextDataset(Dataset):
-    def __init__(self, hf_split, tokenizer, sample_rate, model_name, max_length, 
+    def __init__(self, hf_split, tokenizer, xlm_roberta_tokenizer, sample_rate, model_name, max_length, 
                  spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0,
                  translation_base_dir=None) -> None:
         super().__init__()
@@ -71,7 +73,8 @@ class LibriSpeechTextDataset(Dataset):
         # 直接使用 Hugging Face datasets API 加載數據
         self.dataset = load_dataset("librispeech_asr", split=hf_split)
         self.sample_rate = sample_rate
-        self.tokenizer = tokenizer
+        self.tokenizer = tokenizer 
+        self.xlm_roberta_tokenizer = xlm_roberta_tokenizer
         self.model_name = model_name
         self.max_length = max_length
         self.spec_augment = spec_augment
@@ -81,6 +84,7 @@ class LibriSpeechTextDataset(Dataset):
         self.noise_snr = noise_snr
         self.translation_base_dir = translation_base_dir
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
+        self.n_ctx = 448
         
         print("Dataloader max length : {}".format(max_length))
 
@@ -98,6 +102,16 @@ class LibriSpeechTextDataset(Dataset):
         for custom_split_name in self.custom_split_names:
             relative_dir = os.path.join(custom_split_name, speaker_id, chapter_id)
             trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans.txt")
+            bad_trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans_repeated_characters.txt")
+            
+            # 讀取錯誤句子文件
+            bad_lines = set()
+            if os.path.exists(bad_trans_file_path):
+                with open(bad_trans_file_path, 'r', encoding='utf-8') as bad_file:
+                    for line in bad_file:
+                        if line.startswith("Index:"):
+                            bad_line_id = line.split()[1][:-1]  # 提取 Index 後面的行 ID
+                            bad_lines.add(bad_line_id)
             
             # 讀取翻譯文件並提取對應行的翻譯
             if os.path.exists(trans_file_path):
@@ -107,6 +121,11 @@ class LibriSpeechTextDataset(Dataset):
                         if len(parts) < 2:  # 如果沒有 text，跳過該行
                             continue
                         line_id, text = parts
+                        
+                        # 如果行 ID 在錯誤句子文件中，則跳過該行
+                        if line_id in bad_lines:
+                            continue
+                        
                         if line_id == file_id:
                             translated_text = text
                             break
@@ -163,15 +182,12 @@ class LibriSpeechTextDataset(Dataset):
         
         # 使用 BasicTextNormalizer 正規化文本
         translated_text = self.text_normalizer(translated_text)
-        translated_text = [self.tokenizer.sot,
-                           self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
-                           self.tokenizer.transcribe, 
-                           self.tokenizer.no_timestamps] + \
-                           self.tokenizer.encode(" " + translated_text)
+        print("translated text before tokenization :", translated_text)
+        # 使用XLM-RoBERTa tokenizer來處理翻譯文本
+        roberta_encoded = self.xlm_roberta_tokenizer(translated_text, padding='max_length', truncation=True, max_length=self.n_ctx, return_tensors='pt')
+        translated_text = roberta_encoded['input_ids'].squeeze().numpy().astype(np.float32)
+        print("translated text after tokenization :", translated_text)
         
-        # 將 translated_text 轉換為 NumPy array 並且轉換為 float32
-        translated_text = np.array(translated_text).astype(np.float32)
-               
         return {
             "input_ids": mel,
             "labels": labels,
@@ -194,7 +210,7 @@ class WhisperTextModule(LightningModule):
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
-            state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt, 'step-14000-wer=0.0000-acc=0.0000.ckpt'), map_location=torch.device('cpu'))
+            state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
             state_dict = state_dict['state_dict']
             state_dict_updated = {k[6:]: v  for k, v in state_dict.items()} # remove 'model.'
             print(state_dict_updated.keys())
@@ -345,6 +361,7 @@ class WhisperTextModule(LightningModule):
     def train_dataloader(self):
         dataset = LibriSpeechTextDataset(self.train_split, 
                                       self.tokenizer, 
+                                      xlm_roberta_tokenizer,
                                       SAMPLE_RATE,
                                       self.model_name,
                                       max_length=None,
@@ -368,7 +385,8 @@ class WhisperTextModule(LightningModule):
 
     def val_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.val_clean_split,
-                                self.tokenizer, 
+                                self.tokenizer,
+                                xlm_roberta_tokenizer,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -388,7 +406,8 @@ class WhisperTextModule(LightningModule):
    
     def val_dataloader_other(self):
         dataset = LibriSpeechTextDataset(self.val_other_split,
-                                self.tokenizer, 
+                                self.tokenizer,
+                                xlm_roberta_tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -408,7 +427,8 @@ class WhisperTextModule(LightningModule):
     
     def test_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.test_clean_split,  
-                                self.tokenizer, 
+                                self.tokenizer,
+                                xlm_roberta_tokenizer,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -428,7 +448,8 @@ class WhisperTextModule(LightningModule):
     
     def test_dataloader_other(self):
         dataset = LibriSpeechTextDataset(self.test_other_split, 
-                                self.tokenizer, 
+                                self.tokenizer,
+                                xlm_roberta_tokenizer,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -458,7 +479,7 @@ if __name__ == "__main__":
     # Initialize WandB
     # wandb.init(project="whisper-flamingo",
     #         config=cfg,
-    #         name="whisper-flamingo train librispeech with text backup",
+    #         name="whisper-flamingo with bert tokenizer(audio_max_length=10sec)",
     # )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
@@ -473,7 +494,10 @@ if __name__ == "__main__":
                             'validation.other',
                             'test.clean',
                             'test.other')
-
+    
+    # 初始化XLM-RoBERTa tokenizer
+    xlm_roberta_tokenizer = XLMRobertaTokenizer.from_pretrained('xlm-roberta-base')
+    
     # Create a WandB logger instance
     # wandb_logger = WandbLogger()
     
@@ -507,8 +531,8 @@ if __name__ == "__main__":
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
                                                 model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                            model.test_dataloader_clean(), model.test_dataloader_other()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+        #                                     model.test_dataloader_clean(), model.test_dataloader_other()])
 
     # End the WandB run
     # wandb.finish()

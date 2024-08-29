@@ -33,6 +33,7 @@ seed_everything(SEED, workers=True)
 # my command
 # python -u whisper_ft_librispeech_load_data_from_hf.py config/audio/audio_en_tiny_load_data_from_hf.yaml
 # python -u whisper_ft_librispeech_load_data_from_hf.py config/audio/audio_en_tiny_backup.yaml
+# python -u whisper_ft_librispeech_load_data_from_hf.py config/audio/audio_en_tiny.yaml
 
 class LibriSpeechDataset(Dataset):
     def __init__(self, hf_split, tokenizer, sample_rate, model_name, max_length, 
@@ -112,7 +113,7 @@ class WhisperModelModule(LightningModule):
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
-            state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt, 'step-14000-wer=0.0000-acc=0.0000.ckpt'), map_location=torch.device('cpu'))
+            state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
             state_dict = state_dict['state_dict']
             state_dict_updated = {k[6:]: v  for k, v in state_dict.items()} # remove 'model.'
             print(state_dict_updated.keys())
