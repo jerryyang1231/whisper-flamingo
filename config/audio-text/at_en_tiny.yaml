@@ -5,7 +5,7 @@ accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 500
+validate_every_n_batches: 1000
 num_devices: 1
 precision: 16-mixed
 
@@ -26,7 +26,8 @@ dropout_rate: 0
 lang: en
 resume_training: False
 
-pt_ckpt: 'whisper_en_tiny/step-05000-wer=0.0000-acc=0.0000.ckpt'
+# pt_ckpt: 'whisper_en_tiny/step-05000-wer=0.0000-acc=0.0000.ckpt'
+pt_ckpt: ''
 train_id: whisper-flamingo_en_tiny_without_special_tokens
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout

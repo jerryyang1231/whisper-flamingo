@@ -263,7 +263,7 @@ class AudioEncoder(nn.Module):
             x = block(x)
 
         x = self.ln_post(x)
-        
+
         if track_norm:
             return x, x_norm
             # return x, x_norm, x_v_norm_pre, x_v_norm_post, x_v
@@ -310,25 +310,14 @@ class TextDecoder(nn.Module):
             + self.positional_embedding[offset : offset + x.shape[-1]]
         )
         
+        x = x.to(xa.dtype)
+        
         if xt is not None:
             xt = (
                 self.token_embedding(xt)
                 + self.positional_embedding[offset : offset + xt.shape[-1]]
             )
             xt = xt.to(xa.dtype)
-        
-        # if xt is not None:
-        #     if xt.shape[1] > self.positional_embedding.shape[0]:  # 檢查 xt 是否超過 n_ctx
-        #         print(f"Skipping xt processing because its length {xt.shape[1]} exceeds n_ctx {self.positional_embedding.shape[0]}")
-        #         xt = None
-        #     else:
-        #         xt = (
-        #             self.token_embedding(xt)
-        #             + self.positional_embedding[offset : offset + xt.shape[-1]]
-        #         )
-        #         xt = xt.to(xa.dtype)
-        
-        x = x.to(xa.dtype)
 
         for layer, block in enumerate(self.blocks):
             x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt=xt)

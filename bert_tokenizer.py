@@ -31,7 +31,11 @@ from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
-from transformers import BertTokenizer  # 引入BertTokenizer
+# from transformers import BertTokenizer  
+from transformers import (
+  BertTokenizerFast,
+  AutoModel,
+)
 
 # my command
 # python -u bert_tokenizer.py config/audio-text/bert_tokenizer.yaml
@@ -41,7 +45,7 @@ SEED = 3407
 seed_everything(SEED, workers=True)
 
 class LibriSpeechTextDataset(Dataset):
-    def __init__(self, hf_split, tokenizer, bert_tokenizer, sample_rate, model_name, max_length, 
+    def __init__(self, hf_split, tokenizer, bert_tokenizer, bert_model, sample_rate, model_name, max_length, 
                  spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0,
                  translation_base_dir=None) -> None:
         super().__init__()
@@ -74,6 +78,7 @@ class LibriSpeechTextDataset(Dataset):
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
         self.bert_tokenizer = bert_tokenizer  
+        self.bert_model = bert_model
         self.model_name = model_name
         self.max_length = max_length
         self.spec_augment = spec_augment
@@ -183,8 +188,11 @@ class LibriSpeechTextDataset(Dataset):
         translated_text = self.text_normalizer(translated_text)
 
         # 使用BERT tokenizer來處理翻譯文本
-        bert_encoded = self.bert_tokenizer(translated_text, padding='max_length', truncation=True, max_length=self.n_ctx, return_tensors='pt')
-        translated_text = bert_encoded['input_ids'].squeeze().numpy().astype(np.float32)
+        # bert_encoded = self.bert_tokenizer(translated_text, padding='max_length', truncation=True, max_length=self.n_ctx, return_tensors='pt')
+        bert_encoded = self.bert_tokenizer(translated_text, padding='max_length', truncation=True, return_tensors='pt')
+        # translated_text = bert_encoded['input_ids'].squeeze().numpy().astype(np.float32)
+        outputs = self.bert_model(**bert_encoded)
+        translated_text = outputs.last_hidden_state
         
         # translated_text = [self.tokenizer.sot,
         #                         self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
@@ -373,6 +381,7 @@ class WhisperTextModule(LightningModule):
         dataset = LibriSpeechTextDataset(self.train_split, 
                                       self.tokenizer, 
                                       bert_tokenizer,
+                                      bert_model,
                                       SAMPLE_RATE,
                                       self.model_name,
                                       max_length=None,
@@ -398,6 +407,7 @@ class WhisperTextModule(LightningModule):
         dataset = LibriSpeechTextDataset(self.val_clean_split,
                                 self.tokenizer,
                                 bert_tokenizer,
+                                bert_model,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -418,7 +428,8 @@ class WhisperTextModule(LightningModule):
     def val_dataloader_other(self):
         dataset = LibriSpeechTextDataset(self.val_other_split,
                                 self.tokenizer,
-                                bert_tokenizer, 
+                                bert_tokenizer,
+                                bert_model,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -440,6 +451,7 @@ class WhisperTextModule(LightningModule):
         dataset = LibriSpeechTextDataset(self.test_clean_split,  
                                 self.tokenizer,
                                 bert_tokenizer,
+                                bert_model,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -461,6 +473,7 @@ class WhisperTextModule(LightningModule):
         dataset = LibriSpeechTextDataset(self.test_other_split, 
                                 self.tokenizer,
                                 bert_tokenizer,
+                                bert_model,
                                 SAMPLE_RATE,
                                 self.model_name,
                                 max_length=None,
@@ -488,10 +501,10 @@ if __name__ == "__main__":
     print("audio max length: {}".format(cfg.audio_max_length))
 
     # Initialize WandB
-    wandb.init(project="whisper-flamingo",
-            config=cfg,
-            name="whisper-flamingo with bert tokenizer(audio_max_length=10sec)",
-    )
+    # wandb.init(project="whisper-flamingo",
+    #         config=cfg,
+    #         name="whisper-flamingo with bert tokenizer(audio_max_length=10sec)",
+    # )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
                                                                                 cfg.check_output_dir, 
@@ -507,10 +520,12 @@ if __name__ == "__main__":
                             'test.other')
     
     # 在實例化時傳入BERT tokenizer
-    bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    # bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    bert_tokenizer = BertTokenizerFast.from_pretrained('bert-base-chinese')
+    bert_model = AutoModel.from_pretrained('ckiplab/bert-base-chinese')
     
     # Create a WandB logger instance
-    wandb_logger = WandbLogger()
+    # wandb_logger = WandbLogger()
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -519,8 +534,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
-        logger=[tflogger, wandb_logger],
+        logger=tflogger,
+        # logger=[tflogger, wandb_logger],
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
@@ -542,19 +557,22 @@ if __name__ == "__main__":
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
                                                 model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                            model.test_dataloader_clean(), model.test_dataloader_other()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+        #                                     model.test_dataloader_clean(), model.test_dataloader_other()])
 
     # End the WandB run
-    wandb.finish()
+    # wandb.finish()
 
-# from transformers import BertConfig, BertModel
+# from transformers import (
+#   BertTokenizerFast,
+#   AutoModel,
+# )
 
-# # Initializing a BERT google-bert/bert-base-uncased style configuration
-# configuration = BertConfig()
+# tokenizer = BertTokenizerFast.from_pretrained('bert-base-chinese')
+# model = AutoModel.from_pretrained('ckiplab/bert-base-chinese')
 
-# # Initializing a model (with random weights) from the google-bert/bert-base-uncased style configuration
-# model = BertModel(configuration)
+# inputs = tokenizer("去你聽", return_tensors="pt")
+# outputs = model(**inputs)
 
-# # Accessing the model configuration
-# configuration = model.config
+# last_hidden_states = outputs.last_hidden_state
+# print("last_hidden_states' shape :", last_hidden_states.shape)

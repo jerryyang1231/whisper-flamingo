@@ -10,11 +10,9 @@ num_devices: 1
 precision: 16-mixed
 
 model_name: tiny
-# learning_rate: 1.0e-4 
-learning_rate: 5.0e-5
+learning_rate: 1.0e-4 
 batch_size: 16
-num_train_steps: 60000
-# warmup_steps: 5000
+num_train_steps: 40000
 warmup_steps: 6000
 gradient_accumulation_steps: 1
 

@@ -312,7 +312,7 @@ class WhisperDataCollatorWhithPadding_add_wav_lens:
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "wav_lens": wav_lens  # Add wav_lens to the batch
+            "wav_lens": wav_lens,  # Add wav_lens to the batch
         }
 
         batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
