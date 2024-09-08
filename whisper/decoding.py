@@ -659,7 +659,8 @@ class DecodingTask:
                 # encoded audio features are given; skip audio encoding
                 audio_features = mel
             else:
-                audio_features, x_v = self.model.encoder(mel)
+                # audio_features, x_v = self.model.encoder(mel)
+                audio_features = self.model.encoder(mel)
 
         if audio_features.dtype != (
             torch.float16 if self.options.fp16 else torch.float32

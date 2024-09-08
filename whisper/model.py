@@ -255,10 +255,10 @@ class AudioEncoder(nn.Module):
         # NOTE: pos embedding has max length of 1500 (30s after conv downsample from 3000 mel frames)
         if x.shape[1] > 1500:
             x = x[ :, :1500, :]
-
+    
         # NOTE: if max_len is 30s, then the cropping doesn't do anything.
         x = (x + self.positional_embedding[: x.shape[1]]).to(x.dtype) # trim pos embedding
-
+        
         for layer, block in enumerate(self.blocks):
             x = block(x)
 

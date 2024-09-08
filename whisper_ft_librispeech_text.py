@@ -179,12 +179,12 @@ class LibriSpeechTextDataset(Dataset):
         
         # 使用 BasicTextNormalizer 正規化文本
         translated_text = self.text_normalizer(translated_text)
-        # translated_text = [self.tokenizer.sot,
-        #                         self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
-        #                         self.tokenizer.transcribe, 
-        #                         self.tokenizer.no_timestamps] + \
-        #                         self.tokenizer.encode(" " + translated_text)
-        translated_text = self.tokenizer.encode(" " + translated_text)
+        translated_text = [self.tokenizer.sot,
+                                self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
+                                self.tokenizer.transcribe, 
+                                self.tokenizer.no_timestamps] + \
+                                self.tokenizer.encode(" " + translated_text)
+        
         # 截斷 translated_text 以符合 self.n_ctx 的限制
         if len(translated_text) > self.n_ctx:
             translated_text = translated_text[:self.n_ctx]
@@ -315,11 +315,24 @@ class WhisperTextModule(LightningModule):
             acc = acc if acc < 1 else 0
             
             o_list, o_list_full, l_list, l_list_full = [], [], [], []
+            # for o, l in zip(tokens, labels):
+            #     o_list.append(self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set]))
+            #     # o_list_full.append(self.tokenizer.decode(o))
+            #     l_list.append(self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set]))
+            #     # l_list_full.append(self.tokenizer.decode(l))
             for o, l in zip(tokens, labels):
-                o_list.append(self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set]))
-                # o_list_full.append(self.tokenizer.decode(o))
-                l_list.append(self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set]))
-                # l_list_full.append(self.tokenizer.decode(l))
+            # 解碼並過濾掉特殊標籤
+            decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
+            decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
+            
+            # 對解碼結果進行正規化
+            normalized_o = self.text_normalizer(decoded_o)
+            normalized_l = self.text_normalizer(decoded_l)
+            
+            # 將正規化的結果添加到列表中
+            o_list.append(normalized_o)
+            l_list.append(normalized_l)
+
             wer, cer = wer_cer(hypo=o_list, ref=l_list)
         
             # for i, (hypo, hypo_full, ref, ref_full) in enumerate(zip(o_list, o_list_full, l_list, l_list_full)):
@@ -367,22 +380,23 @@ class WhisperTextModule(LightningModule):
                                       self.tokenizer, 
                                       SAMPLE_RATE,
                                       self.model_name,
-                                      max_length=None,
+                                      max_length=self.cfg.audio_max_length,
                                       spec_augment=self.cfg.spec_augment,
                                       noise_prob=cfg.noise_prob,
                                       train=True,
                                       noise_snr=cfg.noise_snr_train,
                                       translation_base_dir=cfg.translation_base_dir)  
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * self.cfg.batch_size),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='shuffle',
-                            drop_last=True,)
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=True)
         if cfg.num_devices > 1:
             print("Using distributed sampler")
-            length_sorter = DistributedSamplerWrapper(length_sorter)
+            batch_sampler = DistributedSamplerWrapper(batch_sampler)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
 
@@ -391,18 +405,19 @@ class WhisperTextModule(LightningModule):
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
-                                max_length=None,
+                                max_length=self.cfg.audio_max_length,
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=False)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
    
@@ -411,18 +426,19 @@ class WhisperTextModule(LightningModule):
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
-                                max_length=None,
+                                max_length=self.cfg.audio_max_length,
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=False)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
     
@@ -431,18 +447,19 @@ class WhisperTextModule(LightningModule):
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
-                                max_length=None,
+                                max_length=self.cfg.audio_max_length,
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=False)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
     
@@ -451,18 +468,19 @@ class WhisperTextModule(LightningModule):
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
-                                max_length=None,
+                                max_length=self.cfg.audio_max_length,
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
                                 translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=False)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
 

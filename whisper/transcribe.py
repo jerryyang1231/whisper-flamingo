@@ -119,9 +119,12 @@ def transcribe(
 
     if dtype == torch.float32:
         decode_options["fp16"] = False
-
+    
     # Pad 30-seconds of silence to the input audio, for slicing
     mel = log_mel_spectrogram(audio, model.dims.n_mels, padding=N_SAMPLES)
+    # print("transcribe's mel :", mel)
+    # print("transcribe's mel.shape :", mel.shape)
+    # mel = audio
     content_frames = mel.shape[-1] - N_FRAMES
 
     if decode_options.get("language", None) is None:
@@ -133,7 +136,7 @@ def transcribe(
                     "Detecting language using up to the first 30 seconds. Use `--language` to specify the language"
                 )
             mel_segment = pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype)
-            vid_segment = pad_or_trim(video, N_VIDEO_FRAMES).to(model.device).to(dtype)
+            # vid_segment = pad_or_trim(video, N_VIDEO_FRAMES).to(model.device).to(dtype)
             _, probs = model.detect_language(mel_segment)
             decode_options["language"] = max(probs, key=probs.get)
             if verbose is not None:

@@ -5,7 +5,7 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset, DatasetDict  # 載入 Hugging Face 的 datasets
+from datasets import load_dataset  # 載入 Hugging Face 的 datasets
 from torch.utils.data import Dataset
 import whisper
 from pytorch_lightning import LightningModule, Trainer, seed_everything
@@ -29,6 +29,10 @@ from whisper.normalizers.basic import BasicTextNormalizer
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
+# valid_set_list 包含的前11字符的ID
+valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw', 
+                'E0-HOPE7_QU', 'EhqcvfaaYu8', 'gDDbnFcvWcQ', 'iy1fPQQSA6c',
+                'kGbjIuzvPR8', 'MrwSzSVGiRE', 'yht8d59dCpo']
 
 # my command
 # python -u whisper_ft_taigi.py config/audio/audio_taigi_tiny.yaml
@@ -40,18 +44,17 @@ class YTTDTaigiTRSDataset(Dataset):
         
         # 使用 Hugging Face datasets API 加載資料，並進行切分
         if split == 'train':
-            dataset_full = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train', use_auth_token="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")
-            # 將 10% 的資料切分為驗證集
-            split_datasets = dataset_full.train_test_split(test_size=0.1)
-            self.dataset = split_datasets['train']
-            print(f"Train set size: {len(self.dataset)}")
+            dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
+            # 過濾出不在 valid_set_list 中的資料作為訓練集
+            self.dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
+            print(f"train set size: {len(self.dataset)}")
         elif split == 'val':
-            dataset_full = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train', use_auth_token="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")
-            split_datasets = dataset_full.train_test_split(test_size=0.1)
-            self.dataset = split_datasets['test']
-            print(f"Valid set size: {len(self.dataset)}")
+            dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
+            # 根據 valid_set_list 過濾驗證集
+            self.dataset = dataset.filter(lambda sample: sample['id'][:11] in valid_set_list)
+            print(f"valid set size: {len(self.dataset)}")
         else:  # 'test'
-            self.dataset = load_dataset("formospeech/yttd_taigi_trs", name='test', split='train', use_auth_token="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")
+            self.dataset = load_dataset("formospeech/yttd_taigi_trs", name='test', split='train')
             print(f"test set size: {len(self.dataset)}")
         
         self.sample_rate = sample_rate
@@ -311,7 +314,7 @@ print("audio max length: {}".format(cfg.audio_max_length))
 # Initialize WandB
 wandb.init(project="whisper-flamingo",
            config=cfg,
-           name="whisper finetune on yttd_taigi_trs",
+           name="whisper finetune on yttd_taigi_trs (training steps=40k)",
 )
 
 tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 

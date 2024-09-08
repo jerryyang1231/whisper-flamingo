@@ -26,140 +26,83 @@ from utils import (
     wer_cer,
     DistributedSamplerWrapper,
 )
-from utils_batch_samplers import LengthBatchSampler
+from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
-from transformers import BertTokenizer  
-from transformers import XLMRobertaTokenizer
 
 # my command
-# python -u xlm_roberta_tokenizer.py config/audio-text/xlm_roberta_tokenizer.yaml
+# python -u whisper_ft_taigi_text.py config/audio-text/at_taigi_tiny.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
+# valid_set_list 包含的前11字符的ID
+valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw', 
+                'E0-HOPE7_QU', 'EhqcvfaaYu8', 'gDDbnFcvWcQ', 'iy1fPQQSA6c',
+                'kGbjIuzvPR8', 'MrwSzSVGiRE', 'yht8d59dCpo']
 
-class LibriSpeechTextDataset(Dataset):
-    def __init__(self, hf_split, tokenizer, xlm_roberta_tokenizer, sample_rate, model_name, max_length, 
-                 spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0,
-                 translation_base_dir=None) -> None:
+class YTTDTaigiTRSDataset(Dataset):
+    def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
+                 spec_augment, noise_prob=0, noise_fn=None) -> None:
         super().__init__()
-       
-        # Hugging Face split 到自定義 split 的映射字典
-        self.split_mapping = {
-            'train.clean.100': 'train-clean-100',
-            'train.clean.360': 'train-clean-360',
-            'train.other.500': 'train-other-500',
-            'validation.clean': 'dev-clean',
-            'validation.other': 'dev-other',
-            'test.clean': 'test-clean',
-            'test.other': 'test-other'
-        }
         
-        # 保存 Hugging Face 的 split 名稱
-        self.hf_split = hf_split
+        # 使用 Hugging Face datasets API 加載資料，並進行切分
+        if split == 'train':
+            dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
+            # 過濾出不在 valid_set_list 中的資料作為訓練集
+            self.dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
+            print(f"train set size: {len(self.dataset)}")
+        elif split == 'val':
+            dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
+            # 根據 valid_set_list 過濾驗證集
+            self.dataset = dataset.filter(lambda sample: sample['id'][:11] in valid_set_list)
+            print(f"valid set size: {len(self.dataset)}")
+        else:  # 'test'
+            self.dataset = load_dataset("formospeech/yttd_taigi_trs", name='test', split='train')
+            print(f"test set size: {len(self.dataset)}")
         
-        # 針對 train split，分割並對每個部分進行映射
-        if 'train' in hf_split:
-            self.custom_split_names = [
-                self.split_mapping.get(split.strip(), split.strip()) 
-                for split in hf_split.split('+')
-            ]
-        else:
-            self.custom_split_names = [self.split_mapping.get(hf_split, hf_split)]
-        
-        # 直接使用 Hugging Face datasets API 加載數據
-        self.dataset = load_dataset("librispeech_asr", split=hf_split)
         self.sample_rate = sample_rate
-        self.tokenizer = tokenizer 
-        self.xlm_roberta_tokenizer = xlm_roberta_tokenizer
+        self.tokenizer = tokenizer
         self.model_name = model_name
         self.max_length = max_length
         self.spec_augment = spec_augment
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
-        self.train = train
-        self.noise_snr = noise_snr
-        self.translation_base_dir = translation_base_dir
-        self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
-        self.n_ctx = 448
-        
-        print("Dataloader max length : {}".format(max_length))
+        self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
+        # self.n_ctx = 448
 
     def __len__(self):
         return len(self.dataset)
-   
-    def _get_translation_text(self, file_id):
-        
-        # 提取 speaker_id 和 chapter_id
-        speaker_id, chapter_id = file_id.split('-')[0], file_id.split('-')[1]
-        
-        translated_text = ""
 
-        # 遍歷所有可能的 custom_split_names 來查找對應的翻譯文件
-        for custom_split_name in self.custom_split_names:
-            relative_dir = os.path.join(custom_split_name, speaker_id, chapter_id)
-            trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans.txt")
-            bad_trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans_repeated_characters.txt")
-            
-            # 讀取錯誤句子文件
-            bad_lines = set()
-            if os.path.exists(bad_trans_file_path):
-                with open(bad_trans_file_path, 'r', encoding='utf-8') as bad_file:
-                    for line in bad_file:
-                        if line.startswith("Index:"):
-                            bad_line_id = line.split()[1][:-1]  # 提取 Index 後面的行 ID
-                            bad_lines.add(bad_line_id)
-            
-            # 讀取翻譯文件並提取對應行的翻譯
-            if os.path.exists(trans_file_path):
-                with open(trans_file_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        parts = line.strip().split(' ', 1)
-                        if len(parts) < 2:  # 如果沒有 text，跳過該行
-                            continue
-                        line_id, text = parts
-                        
-                        # 如果行 ID 在錯誤句子文件中，則跳過該行
-                        if line_id in bad_lines:
-                            continue
-                        
-                        if line_id == file_id:
-                            translated_text = text
-                            break
-                if translated_text:  # 如果找到翻譯文本，停止繼續查找
-                    break
-                
-        return translated_text
-    
     def __getitem__(self, id):
-        lang, lang_tr = 'en', 'zh'
+        lang = 'zh'
         item = self.dataset[id]
         
         # 獲取音頻數據和文本
         wav_data = item['audio']['array']
         text = item['text']
+        mandarin_text = item['text_mandarin']
         wav_lens = len(wav_data)
-        file_id = item['id']
         
         # 使用 BasicTextNormalizer 正規化文本
         text = self.text_normalizer(text)
+        # 移除空格
+        text = text.replace(" ", "")
         
-        if np.random.rand() > self.noise_prob: # disable noise
+        if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
-        else: # add noise
+        else: # 加噪音
             audio = add_noise(wav_data, self.noise_fn, noise_snr=0).flatten().astype(np.float32)
-
+        
         audio_frames = len(audio.flatten()) // 160
-        # pad audio to cfg.audio_max_length (longer samples filtered out already)
         if self.max_length is not None:
             audio = whisper.pad_or_trim(audio.flatten(), length=self.max_length)
-
+            
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
-    
+            
         if self.spec_augment:
             if self.spec_augment == "ls-double":
                 mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
@@ -168,37 +111,38 @@ class LibriSpeechTextDataset(Dataset):
             else:
                 raise NotImplementedError 
 
-        # Seems like Whisper decode always predicts first token with space, so add a space in the beginning
-        # dec_input_ids = [*self.tokenizer.sot_sequence_including_notimestamps] + self.tokenizer.encode(" " + text)
         dec_input_ids = [self.tokenizer.sot, 
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
-                        self.tokenizer.encode(" " + text)
+                        self.tokenizer.encode(" " + text)       
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
-        
-        # 獲取對應的翻譯文本
-        translated_text = self._get_translation_text(file_id)
-        
+
         # 使用 BasicTextNormalizer 正規化文本
-        translated_text = self.text_normalizer(translated_text)
-        print("translated text before tokenization :", translated_text)
-        # 使用XLM-RoBERTa tokenizer來處理翻譯文本
-        roberta_encoded = self.xlm_roberta_tokenizer(translated_text, padding='max_length', truncation=True, max_length=self.n_ctx, return_tensors='pt')
-        translated_text = roberta_encoded['input_ids'].squeeze().numpy().astype(np.float32)
-        print("translated text after tokenization :", translated_text)
+        mandarin_text = self.text_normalizer(mandarin_text)
+        mandarin_text = [self.tokenizer.sot,
+                            self.tokenizer.special_tokens["<|{}|>".format(lang)],
+                            self.tokenizer.transcribe, 
+                            self.tokenizer.no_timestamps] + \
+                            self.tokenizer.encode(" " + mandarin_text)
+                            
+        # 截斷 translated_text 以符合 self.n_ctx 的限制
+        # if len(translated_text) > self.n_ctx:
+        #     translated_text = translated_text[:self.n_ctx]    
+        
+        # 將 translated_text 轉換為 NumPy array 並且轉換為 float32
+        mandarin_text = np.array(mandarin_text).astype(np.float32)
         
         return {
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translated_text": translated_text,
+            "translated_text": mandarin_text,
             "wav_lens": wav_lens
         }
 
 class WhisperTextModule(LightningModule):
-    def __init__(self, cfg, model_name, lang, train_split, val_clean_split, val_other_split,
-                 test_clean_split, test_other_split) -> None:
+    def __init__(self, cfg, model_name, lang) -> None:
         super().__init__()
         self.model_name = model_name
         print("Loading Whisper model and weights")
@@ -221,7 +165,7 @@ class WhisperTextModule(LightningModule):
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
                 
-        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
+        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
 
         # if 'large' in self.model_name: # only decoder training
         #     for p in self.model.encoder.parameters():
@@ -229,13 +173,9 @@ class WhisperTextModule(LightningModule):
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-        self.cfg = cfg
-        self.train_split = train_split
-        self.val_clean_split = val_clean_split
-        self.val_other_split = val_other_split
-        self.test_clean_split = test_clean_split
-        self.test_other_split = test_other_split
+        self.cfg = cfg        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
+        self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
 
     def forward(self, x):
         return self.model(x)
@@ -309,13 +249,21 @@ class WhisperTextModule(LightningModule):
             total = torch.sum(mask)
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0
-            
+                           
             o_list, o_list_full, l_list, l_list_full = [], [], [], []
             for o, l in zip(tokens, labels):
-                o_list.append(self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set]))
-                # o_list_full.append(self.tokenizer.decode(o))
-                l_list.append(self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set]))
-                # l_list_full.append(self.tokenizer.decode(l))
+                # 解碼並過濾掉特殊標籤
+                decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
+                decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
+                
+                # 正規化文本並移除空格
+                normalized_o = self.text_normalizer(decoded_o).replace(" ", "")
+                normalized_l = self.text_normalizer(decoded_l).replace(" ", "")
+
+                # 將正規化的結果添加到列表中
+                o_list.append(normalized_o)
+                l_list.append(normalized_l)
+            
             wer, cer = wer_cer(hypo=o_list, ref=l_list)
         
             # for i, (hypo, hypo_full, ref, ref_full) in enumerate(zip(o_list, o_list_full, l_list, l_list_full)):
@@ -329,7 +277,7 @@ class WhisperTextModule(LightningModule):
                 if i == 1: break
             
             # log_prefix = 'val' if dataloader_idx == 1 else 'val_noisy_en_babble'
-            log_prefix = {0: 'dev-clean', 1: 'dev-other', 2: 'test-clean', 3: 'test-other'}
+            log_prefix = {0: 'val', 1: 'test'}
             self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/wer_{}".format(log_prefix[dataloader_idx], mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
@@ -359,111 +307,62 @@ class WhisperTextModule(LightningModule):
             self.t_total = self.cfg.num_train_steps
 
     def train_dataloader(self):
-        dataset = LibriSpeechTextDataset(self.train_split, 
+        dataset = YTTDTaigiTRSDataset('train',
                                       self.tokenizer, 
-                                      xlm_roberta_tokenizer,
                                       SAMPLE_RATE,
                                       self.model_name,
-                                      max_length=None,
+                                      max_length=self.cfg.audio_max_length,
                                       spec_augment=self.cfg.spec_augment,
-                                      noise_prob=cfg.noise_prob,
-                                      train=True,
-                                      noise_snr=cfg.noise_snr_train,
-                                      translation_base_dir=cfg.translation_base_dir)  
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * self.cfg.batch_size),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='shuffle',
-                            drop_last=True,)
+                                      noise_prob=cfg.noise_prob)  
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=True)
         if cfg.num_devices > 1:
             print("Using distributed sampler")
-            length_sorter = DistributedSamplerWrapper(length_sorter)
+            batch_sampler = DistributedSamplerWrapper(batch_sampler)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
 
-    def val_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.val_clean_split,
-                                self.tokenizer,
-                                xlm_roberta_tokenizer,
-                                SAMPLE_RATE,
-                                self.model_name,
-                                max_length=None,
-                                spec_augment=False,
-                                noise_prob=0,
-                                train=False,
-                                translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
+    def val_dataloader(self):
+        dataset = YTTDTaigiTRSDataset('val',
+                                    self.tokenizer, 
+                                    SAMPLE_RATE,
+                                    self.model_name,
+                                    max_length=self.cfg.audio_max_length,
+                                    spec_augment=False,
+                                    noise_prob=0)               
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=False)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
-   
-    def val_dataloader_other(self):
-        dataset = LibriSpeechTextDataset(self.val_other_split,
-                                self.tokenizer,
-                                xlm_roberta_tokenizer, 
-                                SAMPLE_RATE,
-                                self.model_name,
-                                max_length=None,
-                                spec_augment=False,
-                                noise_prob=0,
-                                train=False,
-                                translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
+       
+    def test_dataloader(self):
+        dataset = YTTDTaigiTRSDataset('test',  
+                                    self.tokenizer, 
+                                    SAMPLE_RATE,
+                                    self.model_name,
+                                    max_length=self.cfg.audio_max_length,
+                                    spec_augment=False,
+                                    noise_prob=0)                                
+        batch_sampler = SortedBatchSampler(
+                    batch_size = self.cfg.batch_size,
+                    shapes=[(item['wav_lens']) for item in dataset],
+                    sort_in_batch='descending',
+                    sort_batch='descending',
+                    drop_last=False)
         return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
-                          num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
-    
-    def test_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.test_clean_split,  
-                                self.tokenizer,
-                                xlm_roberta_tokenizer,
-                                SAMPLE_RATE,
-                                self.model_name,
-                                max_length=None,
-                                spec_augment=False,
-                                noise_prob=0,
-                                train=False,
-                                translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
-        return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
-                          num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
-    
-    def test_dataloader_other(self):
-        dataset = LibriSpeechTextDataset(self.test_other_split, 
-                                self.tokenizer,
-                                xlm_roberta_tokenizer,
-                                SAMPLE_RATE,
-                                self.model_name,
-                                max_length=None,
-                                spec_augment=False,
-                                noise_prob=0,
-                                train=False,
-                                translation_base_dir=cfg.translation_base_dir)
-        length_sorter = LengthBatchSampler(batch_bins=int(self.cfg.audio_max_length * 16),
-                            shapes=[(item['wav_lens']) for item in dataset],
-                            sort_in_batch='descending',
-                            sort_batch='descending',
-                            drop_last=False)
-        return torch.utils.data.DataLoader(dataset,
-                          batch_sampler=length_sorter,
+                          batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding())
 
@@ -477,10 +376,10 @@ if __name__ == "__main__":
     print("audio max length: {}".format(cfg.audio_max_length))
 
     # Initialize WandB
-    # wandb.init(project="whisper-flamingo",
-    #         config=cfg,
-    #         name="whisper-flamingo with bert tokenizer(audio_max_length=10sec)",
-    # )
+    wandb.init(project="whisper-flamingo",
+            config=cfg,
+            name="whisper-flamingo taigi tiny(num_train_steps=90k)",
+    )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
                                                                                 cfg.check_output_dir, 
@@ -488,18 +387,10 @@ if __name__ == "__main__":
                                                                                 cfg.train_id,
                                                                                 cfg.monitor,)
         
-    model = WhisperTextModule(cfg, cfg.model_name, cfg.lang, 
-                            'train.clean.100+train.clean.360+train.other.500',
-                            'validation.clean',
-                            'validation.other',
-                            'test.clean',
-                            'test.other')
-    
-    # 初始化XLM-RoBERTa tokenizer
-    xlm_roberta_tokenizer = XLMRobertaTokenizer.from_pretrained('xlm-roberta-base')
-    
+    model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
+                            
     # Create a WandB logger instance
-    # wandb_logger = WandbLogger()
+    wandb_logger = WandbLogger()
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -508,8 +399,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        logger=tflogger,
-        # logger=[tflogger, wandb_logger],
+        # logger=tflogger,
+        logger=[tflogger, wandb_logger],
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
@@ -526,13 +417,10 @@ if __name__ == "__main__":
     print(cfg)
     resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
-        trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                                model.test_dataloader_clean(), model.test_dataloader_other()])
+        trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
-        trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                                model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-        #                                     model.test_dataloader_clean(), model.test_dataloader_other()])
+        trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
-    # wandb.finish()
+    wandb.finish()

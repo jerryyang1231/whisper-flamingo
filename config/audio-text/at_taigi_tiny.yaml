@@ -1,6 +1,6 @@
 train_name: whisper
-audio_max_length: 160000 # 10 sec
-text_max_length: 350
+audio_max_length: 480000 # 30 sec
+text_max_length: null
 accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
@@ -12,29 +12,29 @@ precision: 16-mixed
 model_name: tiny
 learning_rate: 1.0e-4 
 batch_size: 16
-num_train_steps: 40000
-warmup_steps: 5000
+num_train_steps: 90000
+warmup_steps: 9000
 gradient_accumulation_steps: 1
 
-monitor: 'dev-other/acc_at'  
+monitor: 'val/acc_at'  
 noise_prob: 0.0
 noise_snr_train: 0
 
 spec_augment: ""
 dropout_rate: 0 
 
-lang: en
+lang: zh
 resume_training: False
 
-pt_ckpt: 'whisper_en_tiny/step-05000-wer=0.0000-acc=0.0000.ckpt'
-train_id: whisper-flamingo_en_tiny_xlm_roberta_tokenizer
+pt_ckpt: 'whisper_taigi_tiny/step-10000-wer=0.0000-acc=0.0000.ckpt'
+train_id: whisper-flamingo_taigi_tiny
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
 
-translation_base_dir: "/share/nas169/jerryyang/corpus/m2m100/"
+# translation_base_dir: "/share/nas169/jerryyang/corpus/m2m100/"
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
 

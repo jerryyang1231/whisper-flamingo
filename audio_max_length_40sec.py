@@ -24,14 +24,14 @@ import wandb
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from whisper.normalizers.basic import BasicTextNormalizer
+from whisper import transcribe
 
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 
 # my command
-# CUDA_VISIBLE_DEVICES=0,1 python -u whisper_ft_librispeech.py config/audio/audio_en_tiny_sova.yaml
-# CUDA_VISIBLE_DEVICES=0,1 python -u whisper_ft_librispeech.py config/audio/audio_en_tiny_viper.yaml
+# python -u audio_max_length_40sec.py config/audio/audio_en_tiny_omen.yaml
 
 class LibriSpeechDataset(Dataset):
     def __init__(self, hf_split, tokenizer, sample_rate, model_name, max_length, 
@@ -339,10 +339,10 @@ print(cfg)
 print("audio max length: {}".format(cfg.audio_max_length))
 
 # Initialize WandB
-wandb.init(project="whisper-flamingo",
-           config=cfg,
-           name="whisper finetune on librispeech viper",
-)
+# wandb.init(project="whisper-flamingo",
+#            config=cfg,
+#            name="whisper finetune on librispeech omen",
+# )
 
 tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
                                                                             cfg.check_output_dir, 
@@ -358,15 +358,15 @@ model = WhisperModelModule(cfg, cfg.model_name, cfg.lang,
                            'test.other')
 
 # Create a WandB logger instance
-wandb_logger = WandbLogger()
+# wandb_logger = WandbLogger()
 
 trainer = Trainer(
     precision=cfg.precision,
     accelerator="gpu",
     max_steps=cfg.num_train_steps,
     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    logger=[tflogger, wandb_logger],
-    # logger=tflogger,
+    # logger=[tflogger, wandb_logger],
+    logger=tflogger,
     callbacks=callback_list,
     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
     devices=cfg.num_devices,
@@ -384,8 +384,8 @@ if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't
 else:
     trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
                                                 model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-    trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                            model.test_dataloader_clean(), model.test_dataloader_other()])
+    # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+    #                                         model.test_dataloader_clean(), model.test_dataloader_other()])
 
 # End the WandB run
-wandb.finish()
+# wandb.finish()

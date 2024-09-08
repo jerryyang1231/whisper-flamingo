@@ -288,31 +288,42 @@ class WhisperDataCollatorWhithPadding:
 
 class WhisperDataCollatorWhithPadding_add_wav_lens:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, wav_lens = [], [], [], []
+        input_ids, labels, dec_input_ids, wav_lens, audio = [], [], [], [], []
 
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
             wav_lens.append(f["wav_lens"])
+            audio.append(f["audio"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
-        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0)
+                    for audio, audio_len in zip(input_ids, audio_lengths)]
 
+        # Pad audio (apply the same padding logic)
+        audio_lengths = [a.shape[0] for a in audio]  # Assuming audio is a 1D array of raw waveform
+        max_audio_len = max(audio_lengths)
+        audio = [np.pad(a, (0, max_audio_len - a_len), 'constant', constant_values=0) 
+                for a, a_len in zip(audio, audio_lengths)]
+        
         label_lengths = [len(lab) for lab in labels]
         dec_input_ids_length = [len(e) for e in dec_input_ids]
         max_label_len = max(label_lengths + dec_input_ids_length)
 
         # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
-        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
-        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                    for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                        for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
 
         batch = {
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "wav_lens": wav_lens,  # Add wav_lens to the batch
+            "audio": audio # Add the padded audio to the batch
         }
 
         batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
