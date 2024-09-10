@@ -539,7 +539,7 @@ def whisper_flamingo_optimizer(model, cfg, t_total):
     )
     return optimizer, scheduler
 
-def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, train_id, monitor='val/acc'):
+def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, train_id, monitor='dev-other/wer'):
     Path(log_output_dir).mkdir(exist_ok=True)
     Path(check_output_dir).mkdir(exist_ok=True)
 
@@ -559,12 +559,13 @@ def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, t
         auto_insert_metric_name=False,
     )
 
-    monitor = monitor.replace('test', 'val') if 'test' in monitor else monitor.replace('val', 'test')
+    # monitor = monitor.replace('test', 'val') if 'test' in monitor else monitor.replace('val', 'test')
     val_checkpoint = ModelCheckpoint(
         dirpath=f"{check_output_dir}/{train_id}",
-        filename="step-{step:05d}-wer={dev-other/wer_at:.4f}-acc={dev-other/acc_at:.4f}",
+        # filename="step-{step:05d}-wer={dev-other/wer_at:.4f}-acc={dev-other/acc_at:.4f}",
+        filename="step-{step:05d}-wer={dev-other/wer:.4f}",
         monitor=monitor,
-        mode='max',
+        mode='min',
         save_top_k=1,
         auto_insert_metric_name=False,
     )

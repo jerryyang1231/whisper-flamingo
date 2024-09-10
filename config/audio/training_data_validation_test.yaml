@@ -1,22 +1,22 @@
 train_name: whisper
-audio_max_length: 640000  # 40 sec
+audio_max_length: 480000  # 30 sec
 text_max_length: null
 accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 1000
+validate_every_n_batches: 100
 num_devices: 1
 precision: 16-mixed
 
 model_name: tiny  
 learning_rate: 1.25e-5  # small
-batch_size: 8
-num_train_steps: 180000
-warmup_steps: 18000
+batch_size: 16
+num_train_steps: 22500
+warmup_steps: 2250
 gradient_accumulation_steps: 1
 
-monitor: 'dev-other/acc'  
+monitor: 'validation/wer'  
 noise_prob: 0.0  
 
 spec_augment: "" 
@@ -27,7 +27,7 @@ resume_training: false
 
 # pt_ckpt: 'whisper_en_tiny/step-05000-wer=0.0000-acc=0.0000.ckpt'
 pt_ckpt: ''
-train_id: whisper_en_tiny_omen
+train_id: whisper_en_tiny_training_data_validation_test
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"

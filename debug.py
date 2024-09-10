@@ -31,7 +31,7 @@ SEED = 3407
 seed_everything(SEED, workers=True)
 
 # my command
-# python -u test.py config/audio/test.yaml
+# python -u debug.py config/audio/debug.yaml
 
 class LibriSpeechDataset(Dataset):
     def __init__(self, hf_split, tokenizer, sample_rate, model_name, model, max_length, 
@@ -225,7 +225,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=None,
+                                      max_length=cfg.train_set_audio_max_length,
                                       spec_augment=self.cfg.spec_augment,
                                       noise_prob=cfg.noise_prob)   
         batch_sampler = SortedBatchSampler(
@@ -248,7 +248,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=None,
+                                      max_length=cfg.test_set_audio_max_length,
                                       spec_augment=False,
                                       noise_prob=0
                                     )
@@ -270,7 +270,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=None,
+                                      max_length=cfg.test_set_audio_max_length,
                                       spec_augment=False,
                                     )
         batch_sampler = SortedBatchSampler(
@@ -291,7 +291,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=None,
+                                      max_length=cfg.test_set_audio_max_length,
                                       spec_augment=False,
                                       noise_prob=0
                                     )
@@ -313,7 +313,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=None,
+                                      max_length=cfg.test_set_audio_max_length,
                                       spec_augment=False,
                                     )
         batch_sampler = SortedBatchSampler(
@@ -334,12 +334,12 @@ with open(cfg_yaml, 'r') as file:
     cfg = types.SimpleNamespace(**dct)
 
 print(cfg)
-print("audio max length: {}".format(cfg.audio_max_length))
+# print("audio max length: {}".format(cfg.audio_max_length))
 
 # Initialize WandB
 wandb.init(project="whisper-flamingo",
            config=cfg,
-           name="whisper finetune on librispeech test",
+           name="whisper finetune on librispeech debug",
 )
 
 tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
