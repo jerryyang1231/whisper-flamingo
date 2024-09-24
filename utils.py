@@ -286,7 +286,7 @@ class WhisperDataCollatorWhithPadding:
 
         return batch
 
-class WhisperDataCollatorWhithPadding_add_wav_lens:
+class WhisperDataCollatorWhithPadding_librispeech:
     def __call__(self, features):
         input_ids, labels, dec_input_ids, wav_lens, audio = [], [], [], [], []
 
@@ -330,6 +330,77 @@ class WhisperDataCollatorWhithPadding_add_wav_lens:
 
         return batch
 
+class WhisperDataCollatorWhithPadding_taigi:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, wav_lens = [], [], [], []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0)
+                    for audio, audio_len in zip(input_ids, audio_lengths)]
+        
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                    for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                        for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "wav_lens": wav_lens,  # Add wav_lens to the batch
+        }
+
+        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+
+        return batch
+
+class WhisperDataCollatorWhithPadding_fleurs:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, wav_lens = [], [], [], []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0)
+                    for audio, audio_len in zip(input_ids, audio_lengths)]
+        
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                    for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                        for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "wav_lens": wav_lens,  # Add wav_lens to the batch
+        }
+
+        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+
+        return batch
 
 class WhisperTextCollatorWhithPadding:
     def __call__(self, features):
@@ -354,9 +425,9 @@ class WhisperTextCollatorWhithPadding:
         dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
         
         # 為 translated_texts 添加 padding，如有需要
-        translated_text_lengths = [len(t) for t in translated_texts]
-        max_translated_text_len = max(translated_text_lengths)
-        translated_texts = [np.pad(t, (0, max_translated_text_len - t_len), 'constant', constant_values=50257) for t, t_len in zip(translated_texts, translated_text_lengths)]
+        # translated_text_lengths = [len(t) for t in translated_texts]
+        # max_translated_text_len = max(translated_text_lengths)
+        # translated_texts = [np.pad(t, (0, max_translated_text_len - t_len), 'constant', constant_values=50257) for t, t_len in zip(translated_texts, translated_text_lengths)]
 
         batch = {
             "input_ids": input_ids,
@@ -366,10 +437,60 @@ class WhisperTextCollatorWhithPadding:
             "wav_lens": wav_lens  # Add wav_lens to the batch
         }
 
-        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+        # batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+        
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
 
         return batch
 
+class WhisperTextCollatorWhithPadding_librispeech:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, translated_texts, wav_lens, audio = [], [], [], [], [], []
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            translated_texts.append(f["translated_text"])
+            wav_lens.append(f["wav_lens"])
+            audio.append(f["audio"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+        
+        # Pad audio (apply the same padding logic)
+        audio_lengths = [a.shape[0] for a in audio]  # Assuming audio is a 1D array of raw waveform
+        max_audio_len = max(audio_lengths)
+        audio = [np.pad(a, (0, max_audio_len - a_len), 'constant', constant_values=0) 
+                for a, a_len in zip(audio, audio_lengths)]
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
+        
+        # 為 translated_texts 添加 padding，如有需要
+        translated_text_lengths = [len(t) for t in translated_texts]
+        max_translated_text_len = max(translated_text_lengths)
+        translated_texts = [np.pad(t, (0, max_translated_text_len - t_len), 'constant', constant_values=50257) for t, t_len in zip(translated_texts, translated_text_lengths)]
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "translated_text": translated_texts,
+            "wav_lens": wav_lens,  # Add wav_lens to the batch
+            "audio": audio # Add the padded audio to the batch
+        }
+
+        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+
+        return batch
 
 class WhisperVideoCollatorWithPadding:
     def __call__(self, features):
@@ -539,7 +660,7 @@ def whisper_flamingo_optimizer(model, cfg, t_total):
     )
     return optimizer, scheduler
 
-def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, train_id, monitor='dev-other/wer'):
+def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, train_id, monitor):
     Path(log_output_dir).mkdir(exist_ok=True)
     Path(check_output_dir).mkdir(exist_ok=True)
 
@@ -558,12 +679,12 @@ def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, t
         save_last=True,
         auto_insert_metric_name=False,
     )
-
     # monitor = monitor.replace('test', 'val') if 'test' in monitor else monitor.replace('val', 'test')
     val_checkpoint = ModelCheckpoint(
         dirpath=f"{check_output_dir}/{train_id}",
-        # filename="step-{step:05d}-wer={dev-other/wer_at:.4f}-acc={dev-other/acc_at:.4f}",
-        filename="step-{step:05d}-wer={dev-other/wer:.4f}",
+        # filename="step-{step:05d}-cer={dev-other/cer:.4f}-wer={dev-other/wer:.4f}",
+        # filename="step-{step:05d}-cer={dev-other/cer_at:.4f}-wer={dev-other/wer_at:.4f}",
+        filename="step-{step:05d}-cer={val/cer:.4f}-wer={val/wer:.4f}",
         monitor=monitor,
         mode='min',
         save_top_k=1,

@@ -12,7 +12,6 @@ from .resnet import ResEncoder
 from .decoding import decode as decode_function
 from .decoding import detect_language as detect_language_function
 from .transcribe import transcribe as transcribe_function
-# from .generation_whisper import generate_function
 
 
 @dataclass
@@ -273,7 +272,7 @@ class AudioEncoder(nn.Module):
 class TextDecoder(nn.Module):
     def __init__(
         self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float,
-        add_gated_x_attn: int, 
+        add_gated_x_attn: int, bert_hidden_size: int 
     ):
         super().__init__()
 
@@ -292,7 +291,13 @@ class TextDecoder(nn.Module):
         mask = torch.empty(n_ctx, n_ctx).fill_(-np.inf).triu_(1)
         self.register_buffer("mask", mask, persistent=False)
         self.dropout_rate = dropout_rate
-        self.dropout = torch.nn.Dropout(dropout_rate)      
+        self.dropout = torch.nn.Dropout(dropout_rate)     
+        
+         # 添加投影層
+        if bert_hidden_size != n_state:
+            self.xt_projection = nn.Linear(bert_hidden_size, n_state)
+        else:
+            self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影
 
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
@@ -313,13 +318,22 @@ class TextDecoder(nn.Module):
         
         x = x.to(xa.dtype)
         
-        if xt is not None:
-            xt = (
-                self.token_embedding(xt)
-                + self.positional_embedding[offset : offset + xt.shape[-1]]
-            )
-            xt = xt.to(xa.dtype)
+        # if xt is not None:
+        #     xt = (
+        #         self.token_embedding(xt)
+        #         + self.positional_embedding[offset : offset + xt.shape[-1]]
+        #     )
+        #     xt = xt.to(xa.dtype)
 
+        if xt is not None:
+            # 如果 BERT 的輸出維度與解碼器的隱藏維度不一致，需要添加一個線性投影層
+            if xt.shape[-1] != x.shape[-1]:
+                xt = self.xt_projection(xt)
+            
+            # 添加位置編碼（可選，取決於您的需求）
+            xt = xt + self.positional_embedding[offset : offset + xt.shape[1]]
+            xt = xt.to(xa.dtype)
+        
         for layer, block in enumerate(self.blocks):
             x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt=xt)
             
@@ -363,6 +377,7 @@ class Whisper(nn.Module):
             self.dims.n_text_layer,
             dropout_rate,
             add_gated_x_attn,
+            bert_hidden_size=768  # 根據您使用的 BERT 模型
         )
         # use the last half among the decoder layers for time alignment by default;
         # to use a specific set of heads, see `set_alignment_heads()` below.
@@ -440,4 +455,3 @@ class Whisper(nn.Module):
     detect_language = detect_language_function
     transcribe = transcribe_function
     decode = decode_function
-    # generate = generate_function

@@ -13,14 +13,13 @@ from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (
     add_noise,
-    WhisperDataCollatorWhithPadding_add_wav_lens,
+    WhisperDataCollatorWhithPadding_taigi,
     whisper_optimizer,
     setup_logging_and_checkpoint,
     wer_cer,
     DistributedSamplerWrapper,
 )
-from utils_batch_samplers import LengthBatchSampler, SortedBatchSampler
-import librosa
+from utils_batch_samplers import SortedBatchSampler
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
@@ -36,6 +35,7 @@ valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw',
 
 # my command
 # python -u whisper_ft_taigi.py config/audio/audio_taigi_tiny.yaml
+# python -u whisper_ft_taigi.py config/audio/audio_taigi_small.yaml
 
 class YTTDTaigiTRSDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
@@ -259,7 +259,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                         batch_sampler=batch_sampler,
                         num_workers=self.cfg.num_worker,
-                        collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens())
+                        collate_fn=WhisperDataCollatorWhithPadding_taigi())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val', 
@@ -279,7 +279,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens()
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi()
                           )
 
     def test_dataloader(self):
@@ -300,7 +300,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens()
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi()
                           )
 
 cfg_yaml = sys.argv[1]
@@ -314,7 +314,7 @@ print("audio max length: {}".format(cfg.audio_max_length))
 # Initialize WandB
 wandb.init(project="whisper-flamingo",
            config=cfg,
-           name="whisper finetune on yttd_taigi_trs (training steps=40k)",
+           name="whisper small finetune on yttd_taigi_trs",
 )
 
 tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
@@ -333,7 +333,7 @@ trainer = Trainer(
     accelerator="gpu",
     max_steps=cfg.num_train_steps,
     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    logger=[tflogger, wandb_logger],
+    logger=wandb_logger,
     # logger=tflogger,
     callbacks=callback_list,
     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off

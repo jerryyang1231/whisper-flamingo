@@ -13,25 +13,24 @@ from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (
     add_noise,
-    WhisperDataCollatorWhithPadding_add_wav_lens,
+    WhisperDataCollatorWhithPadding_librispeech,
     whisper_optimizer,
     setup_logging_and_checkpoint,
     wer_cer,
     DistributedSamplerWrapper,
 )
-from utils_batch_samplers import LengthBatchSampler, SortedBatchSampler
+from utils_batch_samplers import SortedBatchSampler
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from whisper.normalizers.basic import BasicTextNormalizer
-# from whisper import transcribe
 
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 
 # my command
-# python -u debug.py config/audio/debug.yaml
+# python -u final.py config/audio/final.yaml
 
 class LibriSpeechDataset(Dataset):
     def __init__(self, hf_split, tokenizer, sample_rate, model_name, model, max_length, 
@@ -161,35 +160,72 @@ class WhisperModelModule(LightningModule):
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
         audio = batch["audio"]
-        wav_lens = batch["wav_lens"]  
+        wav_lens = batch["wav_lens"] 
         
-        # 根據 wav_lens 修剪每個樣本的音頻數據
-        trimmed_audio = [sample[:wav_lens[i]] for i, sample in enumerate(audio)]
+        # 初始化要存儲結果的列表
+        o_list, l_list = [], []
+
+        if any(length > 480000 for length in wav_lens):
+            # print("There is at least one sample with a length greater than 30 sec.")
+            for i, sample in enumerate(audio):
+                
+                # 修剪音訊數據根據 wav_lens 長度
+                trimmed_audio = sample[:wav_lens[i]]
+                
+                # 使用模型進行音頻解碼
+                decode_result = whisper.transcribe(self.model, trimmed_audio)
+                predicted_text = decode_result['text']
+                
+                # 解碼 ground truth labels
+                label = labels[i].tolist()  # 轉換為 list
+                label = [t for t in label if t != -100]  # 過濾掉 -100（忽略的標記）
+                decoded_label = self.tokenizer.decode([t for t in label if t not in self.special_token_set])
+                
+                # 正規化預測文本和 ground truth 文本
+                normalized_o = self.text_normalizer(predicted_text)
+                normalized_l = self.text_normalizer(decoded_label)
+                
+                # 將正規化的結果添加到列表中
+                o_list.append(normalized_o)
+                l_list.append(normalized_l) 
+        else:
+            # print("No sample exceeds 30 sec.")
+            audio_features = self.model.encoder(input_ids)
+            out = self.model.decoder(dec_input_ids, audio_features)
+
+            loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
+            
+            labels[labels == -100] = self.tokenizer.eot
+            tokens = torch.argmax(out, dim=2)
+
+            eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
+
+            # 針對每個序列進行檢查
+            for i in range(eot_find.shape[0]):
+                if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
+                    first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
+                    tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+
+            mask = ~(tokens[:, 3:] == self.tokenizer.eot)      
+            n_correct = torch.sum(
+                tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
+            )
+            total = torch.sum(mask)
+            acc = n_correct.item() / (total.item() + 1e-8)
+            acc = acc if acc < 1 else 0
         
-        o_list, l_list = [], []  # 預測文本和真實文本的列表
-        
-        for i, sample in enumerate(trimmed_audio):
-            # print(f"Sample {i} content after trimming: {sample}")
-            # print(f"Sample {i} shape after trimming: {sample.shape}")
-            
-            # 使用模型進行音頻解碼
-            decode_result = whisper.transcribe(self.model, sample)
-            predicted_text = decode_result['text']
-            # print(f"decode_result['text']: {predicted_text}")
-            
-            # 解碼 ground truth labels
-            label = labels[i].tolist()  # 轉換為 list
-            label = [t for t in label if t != -100]  # 過濾掉 -100（忽略的標記）
-            decoded_label = self.tokenizer.decode([t for t in label if t not in self.special_token_set])
-            # print(f"Ground truth text: {decoded_label}")
-            
-            # 正規化預測文本和 ground truth 文本
-            normalized_o = self.text_normalizer(predicted_text)
-            normalized_l = self.text_normalizer(decoded_label)
-            
-            # 將正規化的結果添加到列表中
-            o_list.append(normalized_o)
-            l_list.append(normalized_l)    
+            for o, l in zip(tokens, labels):
+                # 解碼並過濾掉特殊標籤
+                decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
+                decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
+                
+                # 對解碼結果進行正規化
+                normalized_o = self.text_normalizer(decoded_o)
+                normalized_l = self.text_normalizer(decoded_l)
+                
+                # 將正規化的結果添加到列表中
+                o_list.append(normalized_o)
+                l_list.append(normalized_l)  
         
         wer, cer = wer_cer(hypo=o_list, ref=l_list)
 
@@ -200,14 +236,15 @@ class WhisperModelModule(LightningModule):
             if i == 1: break
         
         log_prefix = {0: 'dev-clean', 1: 'dev-other', 2: 'test-clean', 3: 'test-other'}
+        # self.log("{}/loss".format(log_prefix[dataloader_idx]), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/cer".format(log_prefix[dataloader_idx]), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/wer".format(log_prefix[dataloader_idx]), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
                 
         return {
             "cer": cer,
-            "wer": wer
+            "wer": wer,
+            # "loss": loss
         }
-
 
     def configure_optimizers(self):
         model = self.model
@@ -225,7 +262,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=cfg.train_set_audio_max_length,
+                                      max_length=None,
                                       spec_augment=self.cfg.spec_augment,
                                       noise_prob=cfg.noise_prob)   
         batch_sampler = SortedBatchSampler(
@@ -240,7 +277,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                         batch_sampler=batch_sampler,
                         num_workers=self.cfg.num_worker,
-                        collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens())
+                        collate_fn=WhisperDataCollatorWhithPadding_librispeech())
 
     def val_dataloader_clean(self):
         dataset = LibriSpeechDataset(self.val_clean_split, 
@@ -248,7 +285,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=cfg.test_set_audio_max_length,
+                                      max_length=cfg.audio_max_length,
                                       spec_augment=False,
                                       noise_prob=0
                                     )
@@ -261,7 +298,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens()
+                          collate_fn=WhisperDataCollatorWhithPadding_librispeech()
                           )
 
     def val_dataloader_other(self):
@@ -270,7 +307,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=cfg.test_set_audio_max_length,
+                                      max_length=cfg.audio_max_length,
                                       spec_augment=False,
                                     )
         batch_sampler = SortedBatchSampler(
@@ -282,7 +319,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens()
+                          collate_fn=WhisperDataCollatorWhithPadding_librispeech()
                           )
 
     def test_dataloader_clean(self):
@@ -291,7 +328,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=cfg.test_set_audio_max_length,
+                                      max_length=cfg.audio_max_length,
                                       spec_augment=False,
                                       noise_prob=0
                                     )
@@ -304,7 +341,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens()
+                          collate_fn=WhisperDataCollatorWhithPadding_librispeech()
                           )
 
     def test_dataloader_other(self):
@@ -313,7 +350,7 @@ class WhisperModelModule(LightningModule):
                                       SAMPLE_RATE,
                                       self.model_name,
                                       self.model,
-                                      max_length=cfg.test_set_audio_max_length,
+                                      max_length=cfg.audio_max_length,
                                       spec_augment=False,
                                     )
         batch_sampler = SortedBatchSampler(
@@ -325,7 +362,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_add_wav_lens()
+                          collate_fn=WhisperDataCollatorWhithPadding_librispeech()
                           )
 
 cfg_yaml = sys.argv[1]
@@ -334,12 +371,12 @@ with open(cfg_yaml, 'r') as file:
     cfg = types.SimpleNamespace(**dct)
 
 print(cfg)
-# print("audio max length: {}".format(cfg.audio_max_length))
+print("audio max length: {}".format(cfg.audio_max_length))
 
 # Initialize WandB
 wandb.init(project="whisper-flamingo",
            config=cfg,
-           name="whisper finetune on librispeech debug",
+           name="whisper finetune on librispeech final ",
 )
 
 tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
@@ -363,7 +400,7 @@ trainer = Trainer(
     accelerator="gpu",
     max_steps=cfg.num_train_steps,
     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    logger=[tflogger, wandb_logger],
+    logger=wandb_logger,
     # logger=tflogger,
     callbacks=callback_list,
     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
@@ -377,13 +414,13 @@ trainer = Trainer(
 print(cfg)
 resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
 if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
-    trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                                model.test_dataloader_clean(), model.test_dataloader_other()])
+    trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other()])
 else:
     trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
                                                 model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
     trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                            model.test_dataloader_clean(), model.test_dataloader_other()])
+                                        model.test_dataloader_clean(), model.test_dataloader_other()])
+
 
 # End the WandB run
 wandb.finish()

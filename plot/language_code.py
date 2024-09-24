@@ -49,7 +49,7 @@ language_embeddings = [embedding.squeeze().cpu().numpy() for embedding in langua
 language_embeddings_np = np.array(language_embeddings)
 
 # 使用 t-SNE 將嵌入降維到 2D 空間
-tsne = TSNE(n_components=2, random_state=42)
+tsne = TSNE(n_components=2, random_state=3407)
 language_vectors_2d = tsne.fit_transform(language_embeddings_np)
 
 # 可視化
