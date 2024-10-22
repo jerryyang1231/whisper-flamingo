@@ -112,6 +112,7 @@ def load_model(
     add_adapter: bool = False,
     adapter_dim: int = 256,
     add_gated_x_attn: int = 0,
+    bert_encoder: bool = False,
 ) -> Whisper:
     """
     Load a Whisper ASR model
@@ -160,7 +161,7 @@ def load_model(
     dims = ModelDimensions(**checkpoint["dims"])
     print("Whisper dropout rate : {}".format(dropout_rate))
     model = Whisper(dims, dropout_rate, video, video_model_path, av_hubert_path, prob_av, prob_a, 
-                    av_hubert_encoder, av_fusion, add_adapter, adapter_dim, add_gated_x_attn)
+                    av_hubert_encoder, av_fusion, add_adapter, adapter_dim, add_gated_x_attn, bert_encoder)
     # model = Whisper(dims)
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 

@@ -127,35 +127,22 @@ class ResidualAttentionBlock(nn.Module):
         )
         self.mlp_ln = LayerNorm(n_state)
         
+        # https://github.com/lucidrains/flamingo-pytorch/blob/10913abbc8b2ceabb2320560d7d9b85fcb85eee3/flamingo_pytorch/flamingo_pytorch.py#L207
         self.add_gated_x_attn = add_gated_x_attn
         if self.add_gated_x_attn != 0:
             print("Adding gated x attn layers")
-            self.gated_x_attn_1 = MultiHeadAttention(n_state, n_head)
-            self.gated_x_attn_2 = MultiHeadAttention(n_state, n_head)
-
-            self.gated_x_attn_ln_1 = LayerNorm(n_state)
-            self.gated_x_attn_ln_2 = LayerNorm(n_state)
-
-            self.attn_gate_1 = nn.Parameter(torch.tensor([0.]))
-            self.attn_gate_2 = nn.Parameter(torch.tensor([0.]))
-
+            self.gated_x_attn = MultiHeadAttention(n_state, n_head)
+            self.gated_x_attn_ln = LayerNorm(n_state)
+            self.attn_gate = nn.Parameter(torch.tensor([0.]))
+            
             self.ff_ln = LayerNorm(n_state)
             self.ff = nn.Sequential(
                 Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state)
             )
             self.ff_gate = nn.Parameter(torch.tensor([0.]))  
-    
+        
     def apply_gated_x_attn(self, x, xt):
-        x = x + self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt)[0] * self.attn_gate_1.tanh()
-        x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
-        return x
-    
-    def apply_gated_x_attn_2(self, x, xt_1, xt_2):
-        # 對第一種語言的特徵進行門控交叉注意力融合
-        x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0] * self.attn_gate_1.tanh()
-        # 對第二種語言的特徵進行門控交叉注意力融合
-        x_2 = self.gated_x_attn_2(self.gated_x_attn_ln_2(x), xt_2)[0] * self.attn_gate_2.tanh()
-        x = x + x_1 + x_2
+        x = x + self.gated_x_attn(self.gated_x_attn_ln(x), xt)[0] * self.attn_gate.tanh()
         x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
         return x
 
@@ -166,47 +153,16 @@ class ResidualAttentionBlock(nn.Module):
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
         xv: Optional[Tensor] = None,
-        xt_1: Optional[Tensor] = None,
-        xt_2: Optional[Tensor] = None,
+        xt: Optional[Tensor] = None,
     ):
         if self.add_gated_x_attn != 0: 
-            if xt_2 is not None:
-                x = self.apply_gated_x_attn_2(x, xt_1, xt_2)
-            else:
-                x = self.apply_gated_x_attn(x, xt_1)
+            x = self.apply_gated_x_attn(x, xt)
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         if self.cross_attn:
             x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
         x = x + self.mlp(self.mlp_ln(x))        
         return x
-
-class ResNet1D(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers):
-        super(ResNet1D, self).__init__()
-        self.layers = nn.ModuleList()
-        for _ in range(num_layers):
-            print(f"Pass {num_layers} layers ResNet")
-            self.layers.append(nn.Sequential(
-                nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
-                nn.Conv1d(hidden_dim, input_dim, kernel_size=3, padding=1),
-                nn.BatchNorm1d(input_dim)
-            ))
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        # x 形状: (batch_size, seq_length, input_dim)
-        x = x.permute(0, 2, 1)  # 转换为 (batch_size, input_dim, seq_length)
-        for layer in self.layers:
-            identity = x
-            out = layer(x)
-            out += identity
-            out = self.relu(out)
-            x = out
-        x = x.permute(0, 2, 1)  # 转回 (batch_size, seq_length, input_dim)
-        return x
-
+    
 class AudioEncoder(nn.Module):
     def __init__(
         self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, 
@@ -220,12 +176,33 @@ class AudioEncoder(nn.Module):
         self.register_buffer("positional_embedding", sinusoids(n_ctx, n_state))
 
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
-            [ResidualAttentionBlock(n_state, n_head, False,
+            [ResidualAttentionBlock(n_state, n_head, cross_attention=False,
                                     add_adapter, adapter_dim, add_gated_x_attn=0) for _ in range(n_layer)]
         )
         self.ln_post = LayerNorm(n_state)
         self.dropout_rate = dropout_rate
         self.dropout = torch.nn.Dropout(dropout_rate)      
+        # self.video = video
+        # self.av_hubert_encoder = av_hubert_encoder
+        # self.av_fusion = av_fusion
+        # if video:
+        #     self.video_projection_scalar = nn.Parameter(torch.tensor(1.))
+        #     self.prob_av, self.prob_a = prob_av, prob_a
+        #     if not av_hubert_encoder:
+        #         self.video_projection = Linear(512, n_state)
+        #         self.video_model = ResEncoder('prelu', video_model_path)
+        #     else:
+        #         from fairseq import checkpoint_utils, utils
+        #         from argparse import Namespace
+        #         self.video_projection = Linear(1024, n_state) # assuming AV-HuBERT large model
+        #         utils.import_user_module(Namespace(user_dir=av_hubert_path))
+        #         print("Loading AV-HuBERT encoder")
+        #         load_weights = False if "no_weights" in video_model_path else True
+        #         models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([video_model_path],) 
+        #                                                                                 # load_weights=load_weights)
+        #         self.video_model = models[0].encoder if 'ft' in video_model_path else models[0]
+        #         num_parameters = sum(p.numel() for p in self.video_model.parameters())
+        #         print("Using AV-HuBERT encoder with parameters: {}".format(num_parameters)) 
 
     def forward(self, x: Tensor, x_v=None, training=False, test_a=False, test_v=False, track_norm=False, 
                 padding_mask=None):
@@ -238,6 +215,42 @@ class AudioEncoder(nn.Module):
         x = x.permute(0, 2, 1)
         if track_norm:
             x_norm = torch.linalg.norm(x, dim=-1).mean()
+
+        # if self.video and not test_a:
+        #     if not self.av_hubert_encoder:
+        #         x_v = self.video_model(x_v) # B, F, T
+        #         x_v = x_v.permute(0, 2, 1) # B, T, F
+        #     else:
+        #         x_v = self.video_model(source={'video': x_v, 'audio': None}, padding_mask=padding_mask)
+        #         x_v = x_v['encoder_out'].permute(1, 0 , 2) # T, B, F -> B, T, F
+                
+        #     if track_norm:
+        #         x_v_norm_pre = torch.linalg.norm(x_v, dim=-1).mean()
+
+        #     x_v = self.video_projection(x_v)
+        #     x_v = self.video_projection_scalar * x_v
+
+        #     if track_norm:
+        #         x_v_norm_post = torch.linalg.norm(x_v, dim=-1).mean()
+
+        #     if not self.av_fusion == 'separate':
+        #         x_v = torch.repeat_interleave(x_v, 2, dim=1) # 25 Hz -> 50 Hz
+
+        #     if self.av_fusion == "early":
+        #         mod_drop_prob = np.random.random()
+        #         if training:
+        #             if 0 < mod_drop_prob <= self.prob_av:
+        #                 pass # use both modalities
+        #             if self.prob_av < mod_drop_prob <= self.prob_av + self.prob_a:
+        #                 x_v = 0 * x_v # use audio
+        #             else:
+        #                 x = 0 * x # use video
+        #         elif test_a:
+        #             x_v = 0 * x_v # use audio
+        #         elif test_v:
+        #             x = 0 * x # use video
+        #         crop_len = min(x.shape[1], x_v.shape[1])
+        #         x = x[:, :crop_len, :] + x_v[:, :crop_len, :]
 
         # NOTE: pos embedding has max length of 1500 (30s after conv downsample from 3000 mel frames)
         if x.shape[1] > 1500:
@@ -259,7 +272,7 @@ class AudioEncoder(nn.Module):
 class TextDecoder(nn.Module):
     def __init__(
         self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float,
-        add_gated_x_attn: int, bert_encoder: bool, bert_hidden_size: int,
+        add_gated_x_attn: int, bert_encoder: bool, bert_hidden_size: int 
     ):
         super().__init__()
 
@@ -269,7 +282,7 @@ class TextDecoder(nn.Module):
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
             [
                 ResidualAttentionBlock(n_state, n_head, cross_attention=True, 
-                                       add_gated_x_attn=add_gated_x_attn)
+                                       add_gated_x_attn=add_gated_x_attn,)
                 for _ in range(n_layer)
             ]
         )
@@ -281,21 +294,22 @@ class TextDecoder(nn.Module):
         self.dropout = torch.nn.Dropout(dropout_rate)     
 
         self.bert_encoder = bert_encoder
+        # 添加投影層
         if bert_hidden_size != n_state:
             self.xt_projection = nn.Linear(bert_hidden_size, n_state)
         else:
-            self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
-        
-        self.resnet = ResNet1D(n_state, n_state, num_layers=4)  
+            self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影
+
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
-                xv: Optional[Tensor] = None, xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None):
+                xv: Optional[Tensor] = None, xt: Optional[Tensor] = None):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens
         xa : torch.Tensor, shape = (batch_size, n_audio_ctx, n_audio_state)
             the encoded audio features to be attended on
         """
+        
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
         
         x = (
@@ -305,25 +319,26 @@ class TextDecoder(nn.Module):
         
         x = x.to(xa.dtype)
         
-        # 定義處理 xt_1 和 xt_2 的邏輯函數
-        def process_xt(xt, offset, bert_encoder, projection, x, positional_embedding, dtype):
-            if not bert_encoder:
-                xt = self.token_embedding(xt) + positional_embedding[offset : offset + xt.shape[-1]]
-                xt = self.resnet(xt)
-            else:
+        if not self.bert_encoder:
+            # 只過 embedding layer
+            if xt is not None:
+                xt = (
+                    self.token_embedding(xt)
+                    + self.positional_embedding[offset : offset + xt.shape[-1]]
+                )
+                xt = xt.to(xa.dtype)
+        else:
+            # 過BERT
+            if xt is not None:
+                # 如果 BERT 的輸出維度與解碼器的隱藏維度不一致，需要添加一個線性投影層
                 if xt.shape[-1] != x.shape[-1]:
-                    xt = projection(xt)
-                xt = xt + positional_embedding[offset : offset + xt.shape[1]]
-            return xt.to(dtype)
-        
-        if xt_1 is not None:
-            xt_1 = process_xt(xt_1, offset, self.bert_encoder, self.xt_projection, x, self.positional_embedding, xa.dtype)
-        
-        if xt_2 is not None:
-            xt_2 = process_xt(xt_2, offset, self.bert_encoder, self.xt_projection, x, self.positional_embedding, xa.dtype)
+                    xt = self.xt_projection(xt)
+                # 添加位置編碼（可選，取決於您的需求）
+                xt = xt + self.positional_embedding[offset : offset + xt.shape[1]]
+                xt = xt.to(xa.dtype)
         
         for layer, block in enumerate(self.blocks):
-            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt_1=xt_1, xt_2=xt_2)
+            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt=xt)
             
         x = self.ln(x)
         
@@ -332,6 +347,7 @@ class TextDecoder(nn.Module):
         ).float()
         
         return logits
+
 
 class Whisper(nn.Module):
     def __init__(self, dims: ModelDimensions, dropout_rate: float, video: bool, 
@@ -367,6 +383,22 @@ class Whisper(nn.Module):
             bert_encoder,
             bert_hidden_size=768, # 根據您使用的 BERT 模型
         )
+        # use the last half among the decoder layers for time alignment by default;
+        # to use a specific set of heads, see `set_alignment_heads()` below.
+        # all_heads = torch.zeros(
+        #     self.dims.n_text_layer, self.dims.n_text_head, dtype=torch.bool
+        # )
+        # all_heads[self.dims.n_text_layer // 2 :] = True
+        # self.register_buffer("alignment_heads", all_heads.to_sparse(), persistent=False)
+
+    # def set_alignment_heads(self, dump: bytes):
+    #     array = np.frombuffer(
+    #         gzip.decompress(base64.b85decode(dump)), dtype=bool
+    #     ).copy()
+    #     mask = torch.from_numpy(array).reshape(
+    #         self.dims.n_text_layer, self.dims.n_text_head
+    #     )
+    #     self.register_buffer("alignment_heads", mask.to_sparse(), persistent=False)
 
     def embed_audio(self, mel: torch.Tensor):
         return self.encoder(mel)

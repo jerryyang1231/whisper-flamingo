@@ -1,5 +1,5 @@
 train_name: whisper
-audio_max_length: 640000  # 40 sec
+audio_max_length: 480000  # 30 sec
 text_max_length: null
 accelerator: auto
 weight_decay: 0.01

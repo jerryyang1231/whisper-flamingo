@@ -25,8 +25,8 @@ dropout_rate: 0
 lang: zh
 resume_training: false
 
-# pt_ckpt: 'whisper_en_tiny/step-05000-wer=0.0000-acc=0.0000.ckpt'
-pt_ckpt: ''
+pt_ckpt: 'whisper_taigi_tiny/step-10000-wer=0.0000-acc=0.0000.ckpt'
+# pt_ckpt: ''
 train_id: whisper_taigi_tiny
 
 log_output_dir: "slurm/train_audio_slurm"

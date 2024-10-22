@@ -10,10 +10,10 @@ num_devices: 1
 precision: 16-mixed
 
 model_name: small
-learning_rate: 1.0e-4 
+learning_rate: 5.0e-5
 batch_size: 8
 num_train_steps: 180000
-warmup_steps: 18000
+warmup_steps: 30000
 gradient_accumulation_steps: 1
 
 monitor: 'val/cer_at'  
@@ -27,7 +27,7 @@ lang: zh
 resume_training: False
 
 pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
-train_id: whisper-flamingo_taigi_small
+train_id: whisBERT-flamingo_taigi_small_tune_ws
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
@@ -36,5 +36,3 @@ add_gated_x_attn: 1 # 0 for False, 1 for True
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
-filename: "step-{step:05d}-cer={val/cer_at:.4f}-wer={val/wer_at:.4f}"
-

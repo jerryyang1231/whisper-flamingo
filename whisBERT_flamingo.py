@@ -22,7 +22,7 @@ from utils import (
     WhisperTextCollatorWhithPadding,
     whisper_optimizer,
     whisper_flamingo_optimizer,
-    setup_logging_and_checkpoint,
+    setup_logging_and_checkpoint_taigi_text,
     wer_cer,
     DistributedSamplerWrapper,
 )
@@ -34,7 +34,9 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 
 # my command
-# python -u whisbert_flamingo.py config/audio-text/at_taigi_small.yaml
+# python -u whisBERT_flamingo.py config/audio-text/at_taigi_small_tune_lr.yaml
+# python -u whisBERT_flamingo.py config/audio-text/at_taigi_small_tune_ws.yaml
+# python -u whisBERT_flamingo.py config/audio-text/at_taigi_tiny.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -122,20 +124,6 @@ class YTTDTaigiTRSDataset(Dataset):
 
         # 使用 BasicTextNormalizer 正規化文本
         mandarin_text = self.text_normalizer(mandarin_text)
-        # print("mandarin_text :", mandarin_text)
-        # mandarin_text = [self.tokenizer.sot,
-        #                     self.tokenizer.special_tokens["<|{}|>".format(lang)],
-        #                     self.tokenizer.transcribe, 
-        #                     self.tokenizer.no_timestamps] + \
-        #                     self.tokenizer.encode(" " + mandarin_text)
-        # print("mandarin_text :", mandarin_text)
-        # print("mandarin_text's shape :", mandarin_text.shape)
-        # 截斷 translated_text 以符合 self.n_ctx 的限制
-        # if len(translated_text) > self.n_ctx:
-        #     translated_text = translated_text[:self.n_ctx]    
-        
-        # 將 translated_text 轉換為 NumPy array 並且轉換為 float32
-        # mandarin_text = np.array(mandarin_text).astype(np.float32)
         
         return {
             "input_ids": mel,
@@ -161,7 +149,7 @@ class WhisperTextModule(LightningModule):
             state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
             state_dict = state_dict['state_dict']
             state_dict_updated = {k[6:]: v  for k, v in state_dict.items()} # remove 'model.'
-            print(state_dict_updated.keys())
+            # print(state_dict_updated.keys())
             try:
                 self.model.load_state_dict(state_dict_updated) 
             except BaseException as e: 
@@ -185,11 +173,6 @@ class WhisperTextModule(LightningModule):
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
         self.bert_model = BertModel.from_pretrained('bert-base-chinese')
         # self.bert_model.to(self.device)  # 將 BERT 模型移動到正確的設備（GPU/CPU）
-
-        # 設定 BERT 模型為評估模式（如果不需要微調）
-        # self.bert_model.eval()
-        # for param in self.bert_model.parameters():
-        #     param.requires_grad = False
 
     def forward(self, x):
         return self.model(x)
@@ -242,8 +225,6 @@ class WhisperTextModule(LightningModule):
         dec_input_ids = batch["dec_input_ids"].long()
         # translated_text = batch["translated_text"].long()
         translated_text = batch["translated_text"]  # 保持為文本列表
-        # print("translated_text :", translated_text)
-        # print("translated_text's shape :",translated_text.shape)
         
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs = self.bert_tokenizer(
@@ -267,7 +248,6 @@ class WhisperTextModule(LightningModule):
 
         labels[labels == -100] = self.tokenizer.eot
 
-        # mod_list = {"at": out_at, "a": out_a, "t": out_t} if cfg.add_gated_x_attn == 0 else {"at": out_at}
         mod_list = {"at": out_at}
         for mod, out in mod_list.items():
             loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
@@ -335,19 +315,6 @@ class WhisperTextModule(LightningModule):
             optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)
         self.optimizer, self.scheduler = optimizer, scheduler
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
-    
-    # def configure_optimizers(self):
-    #     # 將 Whisper 模型和 BERT 模型的參數合併
-    #     optimizer = torch.optim.AdamW(
-    #         list(self.model.parameters()) + list(self.bert_model.parameters()),
-    #         lr=self.cfg.learning_rate,
-    #         betas=(0.9, 0.98),
-    #         eps=1e-8,
-    #         weight_decay=self.cfg.weight_decay
-    #     )
-    #     # ...（調度器的設置）
-    #     return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
-
 
     def setup(self, stage=None):
         if stage == 'fit' or stage is None:
@@ -425,14 +392,14 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small",
+            name="whisBERT-flamingo taigi tiny",
     )
     
-    tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
-                                                                                cfg.check_output_dir, 
-                                                                                cfg.train_name, 
-                                                                                cfg.train_id,
-                                                                                cfg.monitor,)
+    tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi_text(cfg.log_output_dir, 
+                                                                                            cfg.check_output_dir, 
+                                                                                            cfg.train_name, 
+                                                                                            cfg.train_id,
+                                                                                            cfg.monitor,)
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
     

@@ -19,21 +19,22 @@ from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
-    WhisperTextCollatorWhithPadding,
+    WhisperTextCollatorWhithPadding_librispeech,
     whisper_optimizer,
     whisper_flamingo_optimizer,
-    setup_logging_and_checkpoint,
+    setup_logging_and_checkpoint_librispeech_text,
     wer_cer,
     DistributedSamplerWrapper,
 )
-from utils_batch_samplers import LengthBatchSampler
+from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+from transformers import BertTokenizer, BertModel
 
 # my command
-# python -u whisper_ft_librispeech_text_load_data_from_hf.py config/audio-text/at_en_tiny.yaml
+# python -u 2lang.py config/audio-text/at_en-cmn+en-deu_tiny_bert.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -41,8 +42,8 @@ seed_everything(SEED, workers=True)
 
 class LibriSpeechTextDataset(Dataset):
     def __init__(self, hf_split, tokenizer, sample_rate, model_name, max_length, 
-                 spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0,
-                 translation_base_dir=None) -> None:
+                spec_augment, noise_prob=0, noise_fn=None, train=False, noise_snr=0,
+                translation_base_dir_1=None, translation_base_dir_2=None) -> None:
         super().__init__()
        
         # Hugging Face split 到自定義 split 的映射字典
@@ -79,7 +80,8 @@ class LibriSpeechTextDataset(Dataset):
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.train = train
         self.noise_snr = noise_snr
-        self.translation_base_dir = translation_base_dir
+        self.translation_base_dir_1 = translation_base_dir_1
+        self.translation_base_dir_2 = translation_base_dir_2
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
         self.n_ctx = 448
         
@@ -88,7 +90,7 @@ class LibriSpeechTextDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
    
-    def _get_translation_text(self, file_id):
+    def _get_translation_text(self, file_id, translation_base_dir):
         
         # 提取 speaker_id 和 chapter_id
         speaker_id, chapter_id = file_id.split('-')[0], file_id.split('-')[1]
@@ -98,8 +100,8 @@ class LibriSpeechTextDataset(Dataset):
         # 遍歷所有可能的 custom_split_names 來查找對應的翻譯文件
         for custom_split_name in self.custom_split_names:
             relative_dir = os.path.join(custom_split_name, speaker_id, chapter_id)
-            trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans.txt")
-            bad_trans_file_path = os.path.join(self.translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans_repeated_characters.txt")
+            trans_file_path = os.path.join(translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans.txt")
+            bad_trans_file_path = os.path.join(translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans_repeated_characters.txt")
             
             # 讀取錯誤句子文件
             bad_lines = set()
@@ -132,7 +134,8 @@ class LibriSpeechTextDataset(Dataset):
         return translated_text
     
     def __getitem__(self, id):
-        lang, lang_tr = 'en', 'zh'
+        # lang, lang_tr = 'en', 'zh'
+        lang = 'en'
         item = self.dataset[id]
         
         # 獲取音頻數據和文本
@@ -175,29 +178,25 @@ class LibriSpeechTextDataset(Dataset):
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         
         # 獲取對應的翻譯文本
-        translated_text = self._get_translation_text(file_id)
+        translated_text_1 = self._get_translation_text(file_id, self.translation_base_dir_1)
+        translated_text_2 = self._get_translation_text(file_id, self.translation_base_dir_2)
         
         # 使用 BasicTextNormalizer 正規化文本
-        translated_text = self.text_normalizer(translated_text)
-        translated_text = [self.tokenizer.sot,
-                                self.tokenizer.special_tokens["<|{}|>".format(lang_tr)],
-                                self.tokenizer.transcribe, 
-                                self.tokenizer.no_timestamps] + \
-                                self.tokenizer.encode(" " + translated_text)
+        translated_text_1 = self.text_normalizer(translated_text_1)
+        translated_text_2 = self.text_normalizer(translated_text_2)
         
         # 截斷 translated_text 以符合 self.n_ctx 的限制
-        if len(translated_text) > self.n_ctx:
-            translated_text = translated_text[:self.n_ctx]
-        
-        # 將 translated_text 轉換為 NumPy array 並且轉換為 float32
-        translated_text = np.array(translated_text).astype(np.float32)
+        # if len(translated_text) > self.n_ctx:
+        #     translated_text = translated_text[:self.n_ctx]
                
         return {
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translated_text": translated_text,
-            "wav_lens": wav_lens
+            "translated_text_1": translated_text_1,
+            "translated_text_2": translated_text_2,
+            "wav_lens": wav_lens,
+            "audio": audio
         }
 
 class WhisperTextModule(LightningModule):
@@ -210,7 +209,8 @@ class WhisperTextModule(LightningModule):
                                         device='cpu', # avoid OOM on gpu 0 for distributed
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                         dropout_rate=cfg.dropout_rate,
-                                        add_gated_x_attn=cfg.add_gated_x_attn,)
+                                        add_gated_x_attn=cfg.add_gated_x_attn,
+                                        bert_encoder=cfg.bert_encoder)
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
@@ -240,7 +240,12 @@ class WhisperTextModule(LightningModule):
         self.test_clean_split = test_clean_split
         self.test_other_split = test_other_split
         self.special_token_set = set(self.tokenizer.special_tokens.values())
+        self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False) 
 
+        # 初始化 BERT 分詞器和模型
+        self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
+        self.bert_model = BertModel.from_pretrained("bert-base-multilingual-cased")
+        
     def forward(self, x):
         return self.model(x)
 
@@ -249,8 +254,38 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translated_text = batch["translated_text"].long()
+        # translated_text = batch["translated_text"].long()
+        translated_text_1 = batch["translated_text_1"]  # 保持為文本列表
+        translated_text_2 = batch["translated_text_2"]  # 保持為文本列表
+        
+        # 使用 BERT 分詞器對文本進行編碼
+        bert_inputs_1 = self.bert_tokenizer(
+            translated_text_1,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=448
+        ).to(self.device)
+        
+        # 通過 BERT 模型獲取輸出（不計算梯度）
+        # with torch.no_grad():
+        bert_outputs_1 = self.bert_model(**bert_inputs_1)
+        bert_hidden_states_1 = bert_outputs_1.last_hidden_state  # [batch_size, seq_len, hidden_size]
 
+        # 使用 BERT 分詞器對文本進行編碼
+        bert_inputs_2 = self.bert_tokenizer(
+            translated_text_2,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=448
+        ).to(self.device)
+        
+        # 通過 BERT 模型獲取輸出（不計算梯度）
+        # with torch.no_grad():
+        bert_outputs_2 = self.bert_model(**bert_inputs_2)
+        bert_hidden_states_2 = bert_outputs_2.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        
         if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
             for p in self.model.encoder.parameters():
                 p.requires_grad = False
@@ -261,7 +296,8 @@ class WhisperTextModule(LightningModule):
         # else:
         features = self.model.encoder(input_ids, training=True)
 
-        out = self.model.decoder(dec_input_ids, features, xt=translated_text)
+        # 將 BERT 輸出作為 xt 傳遞給解碼器
+        out = self.model.decoder(dec_input_ids, features, xt_1=bert_hidden_states_1, xt_2=bert_hidden_states_2)
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
         
@@ -272,93 +308,123 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translated_text = batch["translated_text"].long()
-
-        features_a, x_norm= self.model.encoder(input_ids, track_norm=True)
+        # translated_text = batch["translated_text"].long()
+        translated_text_1 = batch["translated_text_1"]  # 保持為文本列表
+        translated_text_2 = batch["translated_text_2"]  # 保持為文本列表
+        audio = batch["audio"]
+        wav_lens = batch["wav_lens"] 
         
-        out_at = self.model.decoder(dec_input_ids, features_a, xt=translated_text)
+        # 使用 BERT 分詞器對文本進行編碼
+        bert_inputs_1 = self.bert_tokenizer(
+            translated_text_1,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=448
+        ).to(self.device)
+        
+        # 通過 BERT 模型獲取輸出（不計算梯度）
+        # with torch.no_grad():
+        bert_outputs_1 = self.bert_model(**bert_inputs_1)
+        bert_hidden_states_1 = bert_outputs_1.last_hidden_state  # [batch_size, seq_len, hidden_size]
 
-        # skip
-        # if cfg.add_gated_x_attn == 0:
-        #     features_a = self.model.encoder(input_ids, test_a=True)
-        #     out_a = self.model.decoder(dec_input_ids, features_a)
+        # 使用 BERT 分詞器對文本進行編碼
+        bert_inputs_2 = self.bert_tokenizer(
+            translated_text_2,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=448
+        ).to(self.device)
+        
+        # 通過 BERT 模型獲取輸出（不計算梯度）
+        # with torch.no_grad():
+        bert_outputs_2 = self.bert_model(**bert_inputs_2)
+        bert_hidden_states_2 = bert_outputs_2.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        
+        # 初始化要存儲結果的列表
+        o_list, l_list = [], []
 
-        #     features_t = self.model.encoder(input_ids, test_v=True)
-        #     out_t = self.model.decoder(dec_input_ids, features_t)
-
-        labels[labels == -100] = self.tokenizer.eot
-
-        # mod_list = {"at": out_at, "a": out_a, "t": out_t} if cfg.add_gated_x_attn == 0 else {"at": out_at}
-        mod_list = {"at": out_at}
-        for mod, out in mod_list.items():
-            loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
-            # remove all decoder predictions after first eot for proper decoding
-            tokens = torch.argmax(out, dim=2)
-
-            # Set all decoder predictions after first eot to eot
-            # TODO: fix for large-v3, which predicts <eot> in the beginning
-            eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-                        
-            # 針對每個序列進行檢查
-            for i in range(eot_find.shape[0]):
-                if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
-                    first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
-                    tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
-
-            # calculate next token prediction, not include lang tag, task, and no timestamps token
-            mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
-            n_correct = torch.sum(
-                tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
-            )
-            total = torch.sum(mask)
-            acc = n_correct.item() / (total.item() + 1e-6)
-            acc = acc if acc < 1 else 0
+        if any(length > 480000 for length in wav_lens):
+            # print("There is at least one sample with a length greater than 30 sec.")
+            for i, sample in enumerate(audio):
+                
+                # 修剪音訊數據根據 wav_lens 長度
+                trimmed_audio = sample[:wav_lens[i]]
+                
+                # 使用模型進行音頻解碼
+                decode_result = whisper.transcribe(self.model, trimmed_audio)
+                predicted_text = decode_result['text']
+                
+                # 解碼 ground truth labels
+                label = labels[i].tolist()  # 轉換為 list
+                label = [t for t in label if t != -100]  # 過濾掉 -100（忽略的標記）
+                decoded_label = self.tokenizer.decode([t for t in label if t not in self.special_token_set])
+                
+                # 正規化預測文本和 ground truth 文本
+                normalized_o = self.text_normalizer(predicted_text)
+                normalized_l = self.text_normalizer(decoded_label)
+                
+                # 將正規化的結果添加到列表中
+                o_list.append(normalized_o)
+                l_list.append(normalized_l) 
+        else:
+            features_a, x_norm= self.model.encoder(input_ids, track_norm=True)
+            # 將 BERT 輸出作為 xt 傳遞給解碼器
+            out_at = self.model.decoder(dec_input_ids, features_a, xt_1=bert_hidden_states_1, xt_2=bert_hidden_states_2)
             
-            o_list, o_list_full, l_list, l_list_full = [], [], [], []
-            # for o, l in zip(tokens, labels):
-            #     o_list.append(self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set]))
-            #     # o_list_full.append(self.tokenizer.decode(o))
-            #     l_list.append(self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set]))
-            #     # l_list_full.append(self.tokenizer.decode(l))
-            for o, l in zip(tokens, labels):
-            # 解碼並過濾掉特殊標籤
-            decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
-            decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
-            
-            # 對解碼結果進行正規化
-            normalized_o = self.text_normalizer(decoded_o)
-            normalized_l = self.text_normalizer(decoded_l)
-            
-            # 將正規化的結果添加到列表中
-            o_list.append(normalized_o)
-            l_list.append(normalized_l)
+            labels[labels == -100] = self.tokenizer.eot
+
+            # mod_list = {"at": out_at, "a": out_a, "t": out_t} if cfg.add_gated_x_attn == 0 else {"at": out_at}
+            mod_list = {"at": out_at}
+            for mod, out in mod_list.items():
+                loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
+                # remove all decoder predictions after first eot for proper decoding
+                tokens = torch.argmax(out, dim=2)
+
+                # Set all decoder predictions after first eot to eot
+                # TODO: fix for large-v3, which predicts <eot> in the beginning
+                eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
+                            
+                # 針對每個序列進行檢查
+                for i in range(eot_find.shape[0]):
+                    if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
+                        first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
+                        tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+
+                # calculate next token prediction, not include lang tag, task, and no timestamps token
+                mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
+                n_correct = torch.sum(
+                    tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
+                )
+                total = torch.sum(mask)
+                acc = n_correct.item() / (total.item() + 1e-6)
+                acc = acc if acc < 1 else 0
+                
+                for o, l in zip(tokens, labels):
+                    # 解碼並過濾掉特殊標籤
+                    decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
+                    decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
+                    
+                    # 對解碼結果進行正規化
+                    normalized_o = self.text_normalizer(decoded_o)
+                    normalized_l = self.text_normalizer(decoded_l)
+                    
+                    # 將正規化的結果添加到列表中
+                    o_list.append(normalized_o)
+                    l_list.append(normalized_l)
 
             wer, cer = wer_cer(hypo=o_list, ref=l_list)
-        
-            # for i, (hypo, hypo_full, ref, ref_full) in enumerate(zip(o_list, o_list_full, l_list, l_list_full)):
-            print("Mod: {}".format(mod))
+
             for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
-                print("-"*10)
+                print("="*100)
                 print("PRED: {}".format(hypo))
-                # print(hypo_full)
                 print("REF:  {}".format(ref))
-                # print(ref_full)
                 if i == 1: break
-            
-            # log_prefix = 'val' if dataloader_idx == 1 else 'val_noisy_en_babble'
+
             log_prefix = {0: 'dev-clean', 1: 'dev-other', 2: 'test-clean', 3: 'test-other'}
-            self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/wer_{}".format(log_prefix[dataloader_idx], mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            self.log("{}/acc_{}".format(log_prefix[dataloader_idx], mod), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            # if self.cfg.add_gated_x_attn != 0 and dataloader_idx == 1: # only log for clean
-            #     for i in range(0, 24, 6):
-            #         self.log("val/attn_gate_layer_{}".format(i), self.model.decoder.blocks[i].attn_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-            #         self.log("val/ff_gate_layer_{}".format(i), self.model.decoder.blocks[i].ff_gate.tanh().item(), on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)         
-        # if dataloader_idx == 3: # only log for val,clean
-        #     self.log("val/x_norm", x_norm, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        #     self.log("val/x_v_norm_pre", x_v_norm_pre, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        #     self.log("val/x_v_norm_post", x_v_norm_post, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         
         return
        
@@ -380,12 +446,13 @@ class WhisperTextModule(LightningModule):
                                       self.tokenizer, 
                                       SAMPLE_RATE,
                                       self.model_name,
-                                      max_length=self.cfg.audio_max_length,
+                                      max_length=480000,
                                       spec_augment=self.cfg.spec_augment,
                                       noise_prob=cfg.noise_prob,
                                       train=True,
                                       noise_snr=cfg.noise_snr_train,
-                                      translation_base_dir=cfg.translation_base_dir)  
+                                      translation_base_dir_1=cfg.translation_base_dir_1,
+                                      translation_base_dir_2=cfg.translation_base_dir_2)  
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -398,7 +465,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_librispeech())
 
     def val_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.val_clean_split,
@@ -409,7 +476,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                translation_base_dir=cfg.translation_base_dir)
+                                translation_base_dir_1=cfg.translation_base_dir_1,
+                                translation_base_dir_2=cfg.translation_base_dir_2)
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -419,7 +487,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_librispeech())
    
     def val_dataloader_other(self):
         dataset = LibriSpeechTextDataset(self.val_other_split,
@@ -430,7 +498,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                translation_base_dir=cfg.translation_base_dir)
+                                translation_base_dir_1=cfg.translation_base_dir_1,
+                                translation_base_dir_2=cfg.translation_base_dir_2)
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -440,7 +509,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_librispeech())
     
     def test_dataloader_clean(self):
         dataset = LibriSpeechTextDataset(self.test_clean_split,  
@@ -451,7 +520,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                translation_base_dir=cfg.translation_base_dir)
+                                translation_base_dir_1=cfg.translation_base_dir_1,
+                                translation_base_dir_2=cfg.translation_base_dir_2)
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -461,7 +531,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_librispeech())
     
     def test_dataloader_other(self):
         dataset = LibriSpeechTextDataset(self.test_other_split, 
@@ -472,7 +542,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                translation_base_dir=cfg.translation_base_dir)
+                                translation_base_dir_1=cfg.translation_base_dir_1,
+                                translation_base_dir_2=cfg.translation_base_dir_2)
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -482,7 +553,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_librispeech())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -496,14 +567,16 @@ if __name__ == "__main__":
     # Initialize WandB
     # wandb.init(project="whisper-flamingo",
     #         config=cfg,
-    #         name="whisper-flamingo w/o special tokens(audio_max_length=10sec)",
+    #         # name="whisper-flamingo + BERT en-cmn",
+    #         # name="whisper-flamingo + BERT en-deu",
+    #         name="whisper-flamingo + BERT en-cmn + en-deu",
     # )
     
-    tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
-                                                                                cfg.check_output_dir, 
-                                                                                cfg.train_name, 
-                                                                                cfg.train_id,
-                                                                                cfg.monitor,)
+    tflogger, callback_list = setup_logging_and_checkpoint_librispeech_text(cfg.log_output_dir, 
+                                                                            cfg.check_output_dir, 
+                                                                            cfg.train_name, 
+                                                                            cfg.train_id,
+                                                                            cfg.monitor,)
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang, 
                             'train.clean.100+train.clean.360+train.other.500',
@@ -523,7 +596,7 @@ if __name__ == "__main__":
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
         logger=tflogger,
-        # logger=[tflogger, wandb_logger],
+        # logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,

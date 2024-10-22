@@ -1,8 +1,7 @@
-# en -> fr
 import os
 import logging
 import torch
-from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 設定日誌
@@ -12,9 +11,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # 加載模型和標記器
-model_name = "facebook/m2m100_418M"
-tokenizer = M2M100Tokenizer.from_pretrained(model_name)
-model = M2M100ForConditionalGeneration.from_pretrained(model_name).to(device)
+model_name = "facebook/seamless-m4t-v2-large"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
 
 # 設置源語言和目標語言
 tokenizer.src_lang = "en"
@@ -24,7 +23,7 @@ def translate_batch(texts):
         # 將多個文本編碼為批量輸入
         encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
         # 批量生成翻譯文本
-        generated_tokens = model.generate(**encoded, forced_bos_token_id=tokenizer.get_lang_id("fr"))
+        generated_tokens = model.generate(**encoded, tgt_lang="rus")
         # 批量解碼
         translated_texts = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         return translated_texts
@@ -32,7 +31,7 @@ def translate_batch(texts):
         logging.error(f"Batch translation failed: {e}")
         return [""] * len(texts)
 
-def process_file(trans_file_path, output_file_path, batch_size=4):
+def process_file(trans_file_path, output_file_path, batch_size=8):
     try:
         with open(trans_file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -63,7 +62,7 @@ def process_file(trans_file_path, output_file_path, batch_size=4):
     except Exception as e:
         logging.error(f"Error processing file '{trans_file_path}': {e}")
 
-def process_directory_multithreaded(root_dir, output_dir, max_workers=4, batch_size=4):
+def process_directory_multithreaded(root_dir, output_dir, max_workers=4, batch_size=8):
     os.makedirs(output_dir, exist_ok=True)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
@@ -86,8 +85,8 @@ def process_directory_multithreaded(root_dir, output_dir, max_workers=4, batch_s
                 logging.error(f"Error in thread execution: {e}")
 
 librispeech_path = "/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech"  # 替換為實際路徑
-output_path = "/share/nas169/jerryyang/corpus/m2m100/french"  # 替換為實際輸出路徑
+output_path = "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Russian"  # 替換為實際輸出路徑
 
 datasets = ["train-clean-100", "train-clean-360", "train-other-500", "dev-clean", "dev-other", "test-clean", "test-other"]
 for dataset in datasets:
-    process_directory_multithreaded(os.path.join(librispeech_path, dataset), os.path.join(output_path, dataset), max_workers=4, batch_size=4)
+    process_directory_multithreaded(os.path.join(librispeech_path, dataset), os.path.join(output_path, dataset), max_workers=4, batch_size=8)

@@ -15,7 +15,7 @@ from utils import (
     add_noise,
     WhisperDataCollatorWhithPadding_taigi,
     whisper_optimizer,
-    setup_logging_and_checkpoint,
+    setup_logging_and_checkpoint_taigi,
     wer_cer,
     DistributedSamplerWrapper,
 )
@@ -70,7 +70,7 @@ class YTTDTaigiTRSDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, id):
-        lang = 'zh'  # 假設你要用普通話作為語言標籤
+        lang = 'zh'  
         item = self.dataset[id]
         
         # 獲取音頻數據和文本
@@ -312,29 +312,29 @@ print(cfg)
 print("audio max length: {}".format(cfg.audio_max_length))
 
 # Initialize WandB
-wandb.init(project="whisper-flamingo",
-           config=cfg,
-           name="whisper small finetune on yttd_taigi_trs",
-)
+# wandb.init(project="whisper-flamingo",
+#            config=cfg,
+#            name="whisper small finetune on yttd_taigi_trs (num_train_steps = 80k, warmup_steps = 8k)",
+# )
 
-tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
-                                                                            cfg.check_output_dir, 
-                                                                            cfg.train_name, 
-                                                                            cfg.train_id,
-                                                                            cfg.monitor,)
+tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
+                                                                                    cfg.check_output_dir, 
+                                                                                    cfg.train_name, 
+                                                                                    cfg.train_id,
+                                                                                    cfg.monitor,)
 
 model = WhisperModelModule(cfg, cfg.model_name, cfg.lang)
 
 # Create a WandB logger instance
-wandb_logger = WandbLogger()
+# wandb_logger = WandbLogger()
 
 trainer = Trainer(
     precision=cfg.precision,
     accelerator="gpu",
     max_steps=cfg.num_train_steps,
     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    logger=wandb_logger,
-    # logger=tflogger,
+    # logger=wandb_logger,
+    logger=tflogger,
     callbacks=callback_list,
     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
     devices=cfg.num_devices,
@@ -350,7 +350,7 @@ if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't
     trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 else:
     trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-    trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+    # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
 # End the WandB run
-wandb.finish()
+# wandb.finish()

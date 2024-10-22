@@ -42,7 +42,7 @@ class LibriSpeechDataset(Dataset):
         print(f"{hf_split} size: {len(self.dataset)} samples")
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
-        self.model_name = model_name
+        # self.model_name = model_name
         self.model = model
         self.max_length = max_length
         self.spec_augment = spec_augment
