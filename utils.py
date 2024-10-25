@@ -18,6 +18,7 @@ from operator import itemgetter
 from typing import Iterator, Optional
 from torch.utils.data import Dataset, DistributedSampler
 from torch.utils.data.sampler import Sampler
+import json
 
 def load_wave(wave_path, sample_rate:int=16000) -> torch.Tensor:
     waveform, sr = torchaudio.load(wave_path, normalize=True)
@@ -745,8 +746,8 @@ def whisper_flamingo_projection_optimizer(model, cfg, t_total):
     return optimizer, scheduler
 
 def whisper_flamingo_optimizer(model, cfg, t_total):
-    x_attn = ["gated_x_attn", "attn_gate", "ff"]
-           
+    x_attn = ["gated_x_attn", "attn_gate", "ff", "resnet"]
+       
     optimizer_grouped_parameters = [
         {
             "params": [p for n, p in model.named_parameters()
@@ -1126,3 +1127,32 @@ def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, a
         return None
 
     return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
+
+def get_all_keywords(mandarin_text):
+    mandarin_text = mandarin_text
+    print("mandarin_text :", mandarin_text)
+
+    # 句子斷詞
+    mandarin_text_list = mandarin_text.split()
+    print("mandarin_text_list :", mandarin_text_list)
+
+    # 讀取您的 JSON 華台辭典
+    with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
+        dictionary = json.load(f)
+
+    # 初始化一個空的列表來存放所有查詢結果
+    all_keywords = []
+
+    # 查找每個詞彙是否有華台翻譯，並將所有翻譯加入 all_keywords
+    for word in mandarin_text_list:
+        if word in dictionary:
+            print(f"word: {word}, keywords: {dictionary[word]}")
+            all_keywords.extend(dictionary[word])  # 再加入所有翻譯
+
+    print("all_keywords list:", all_keywords)
+    all_keywords = "".join(all_keywords)
+    
+    # 輸出結果，列出所有原詞與其翻譯
+    print("all_keywords string:", all_keywords)
+    
+    return all_keywords

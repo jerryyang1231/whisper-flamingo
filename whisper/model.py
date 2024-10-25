@@ -185,7 +185,7 @@ class ResNet1D(nn.Module):
         super(ResNet1D, self).__init__()
         self.layers = nn.ModuleList()
         for _ in range(num_layers):
-            print(f"Pass {num_layers} layers ResNet")
+            print(f"Add ResNet layers")
             self.layers.append(nn.Sequential(
                 nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1),
                 nn.BatchNorm1d(hidden_dim),
@@ -196,15 +196,15 @@ class ResNet1D(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        # x 形状: (batch_size, seq_length, input_dim)
-        x = x.permute(0, 2, 1)  # 转换为 (batch_size, input_dim, seq_length)
+        # x 形狀: (batch_size, seq_length, input_dim)
+        x = x.permute(0, 2, 1)  # 轉換為 (batch_size, input_dim, seq_length)
         for layer in self.layers:
             identity = x
             out = layer(x)
             out += identity
             out = self.relu(out)
             x = out
-        x = x.permute(0, 2, 1)  # 转回 (batch_size, seq_length, input_dim)
+        x = x.permute(0, 2, 1)  # 轉回 (batch_size, seq_length, input_dim)
         return x
 
 class AudioEncoder(nn.Module):
@@ -253,13 +253,12 @@ class AudioEncoder(nn.Module):
 
         if track_norm:
             return x, x_norm
-            # return x, x_norm, x_v_norm_pre, x_v_norm_post, x_v
         return x
 
 class TextDecoder(nn.Module):
     def __init__(
         self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float,
-        add_gated_x_attn: int, bert_encoder: bool, bert_hidden_size: int,
+        add_gated_x_attn: int, bert_encoder: bool, bert_hidden_size: int, add_resnet: bool, num_resnet_layer: int,
     ):
         super().__init__()
 
@@ -286,7 +285,9 @@ class TextDecoder(nn.Module):
         else:
             self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
         
-        self.resnet = ResNet1D(n_state, n_state, num_layers=4)  
+        self.add_resnet = add_resnet
+        if add_resnet:
+            self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
                 xv: Optional[Tensor] = None, xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None):
@@ -309,7 +310,8 @@ class TextDecoder(nn.Module):
         def process_xt(xt, offset, bert_encoder, projection, x, positional_embedding, dtype):
             if not bert_encoder:
                 xt = self.token_embedding(xt) + positional_embedding[offset : offset + xt.shape[-1]]
-                xt = self.resnet(xt)
+                if self.add_resnet:
+                    xt = self.resnet(xt)
             else:
                 if xt.shape[-1] != x.shape[-1]:
                     xt = projection(xt)
@@ -336,7 +338,8 @@ class TextDecoder(nn.Module):
 class Whisper(nn.Module):
     def __init__(self, dims: ModelDimensions, dropout_rate: float, video: bool, 
                  video_model_path: str, av_hubert_path: str, prob_av: float, prob_a: float, av_hubert_encoder: bool,
-                 av_fusion: str, add_adapter: bool, adapter_dim: int, add_gated_x_attn: int, bert_encoder: bool):
+                 av_fusion: str, add_adapter: bool, adapter_dim: int, add_gated_x_attn: int, 
+                 bert_encoder: bool, add_resnet: bool, num_resnet_layer: int,):
         super().__init__()
         self.dims = dims
         self.encoder = AudioEncoder(
@@ -365,7 +368,9 @@ class Whisper(nn.Module):
             dropout_rate,
             add_gated_x_attn,
             bert_encoder,
-            bert_hidden_size=768, # 根據您使用的 BERT 模型
+            768,
+            add_resnet,
+            num_resnet_layer,
         )
 
     def embed_audio(self, mel: torch.Tensor):

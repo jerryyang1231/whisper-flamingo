@@ -10,10 +10,10 @@ num_devices: 1
 precision: 16-mixed
 
 model_name: small
-learning_rate: 1.0e-4 
+learning_rate: 5.0e-5
 batch_size: 8
 num_train_steps: 180000
-warmup_steps: 18000
+warmup_steps: 30000
 gradient_accumulation_steps: 1
 
 monitor: 'val/cer_at'  
@@ -33,6 +33,8 @@ prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
+add_resnet: False
+num_resnet_layer: 4
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"

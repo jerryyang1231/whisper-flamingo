@@ -19,10 +19,10 @@ from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
-    WhisperTextCollatorWhithPadding,
+    WhisperTextCollatorWhithPadding_taigi_with_bert,
     whisper_optimizer,
     whisper_flamingo_optimizer,
-    setup_logging_and_checkpoint,
+    setup_logging_and_checkpoint_taigi,
     wer_cer,
     DistributedSamplerWrapper,
 )
@@ -78,7 +78,7 @@ class YTTDTaigiTRSDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, id):
-        lang = 'zh'
+        lang = cfg.lang
         item = self.dataset[id]
         
         # 獲取音頻數據和文本
@@ -154,7 +154,10 @@ class WhisperTextModule(LightningModule):
                                         device='cpu', # avoid OOM on gpu 0 for distributed
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                         dropout_rate=cfg.dropout_rate,
-                                        add_gated_x_attn=cfg.add_gated_x_attn,)
+                                        add_gated_x_attn=cfg.add_gated_x_attn,
+                                        add_resnet= cfg.add_resnet,
+                                        num_resnet_layer=cfg.num_resnet_layer,
+                                        )
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
@@ -165,7 +168,7 @@ class WhisperTextModule(LightningModule):
             try:
                 self.model.load_state_dict(state_dict_updated) 
             except BaseException as e: 
-                print(str(e))
+                # print(str(e))
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
                 
@@ -315,7 +318,6 @@ class WhisperTextModule(LightningModule):
                 # print(ref_full)
                 if i == 1: break
             
-            # log_prefix = 'val' if dataloader_idx == 1 else 'val_noisy_en_babble'
             log_prefix = {0: 'val', 1: 'test'}
             self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
@@ -357,7 +359,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_taigi_with_bert())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -376,7 +378,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_taigi_with_bert())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -395,7 +397,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding())
+                          collate_fn=WhisperTextCollatorWhithPadding_taigi_with_bert())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -407,21 +409,22 @@ if __name__ == "__main__":
     print("audio max length: {}".format(cfg.audio_max_length))
 
     # Initialize WandB
-    wandb.init(project="whisper-flamingo",
-            config=cfg,
-            name="whisbert-flamingo taigi small (num_train_steps = 360k)",
-    )
+    # wandb.init(project="whisper-flamingo",
+    #         config=cfg,
+    #         name="whisbert-flamingo taigi small (num_train_steps = 360k)",
+    # )
     
-    tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint(cfg.log_output_dir, 
-                                                                                cfg.check_output_dir, 
-                                                                                cfg.train_name, 
-                                                                                cfg.train_id,
-                                                                                cfg.monitor,)
+    tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
+                                                                                    cfg.check_output_dir, 
+                                                                                    cfg.train_name, 
+                                                                                    cfg.train_id,
+                                                                                    cfg.monitor,
+                                                                                    cfg.filename)
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
     
     # Create a WandB logger instance
-    wandb_logger = WandbLogger()
+    # wandb_logger = WandbLogger()
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -430,8 +433,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
-        logger=wandb_logger,
+        logger=tflogger,
+        # logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
@@ -451,7 +454,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
-    wandb.finish()
+    # wandb.finish()

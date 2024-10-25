@@ -34,6 +34,11 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
 # python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small.yaml
+# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-4.yaml
+# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-8.yaml
+# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-16.yaml
+# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-32.yaml
+# CUDA_VISIBLE_DEVICES=2 python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-64.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -104,13 +109,13 @@ class YTTDTaigiTRSDataset(Dataset):
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
             
-        if self.spec_augment:
-            if self.spec_augment == "ls-double":
-                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
-            elif self.spec_augment == "ls-basic":
-                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
-            else:
-                raise NotImplementedError 
+        # if self.spec_augment:
+        #     if self.spec_augment == "ls-double":
+        #         mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
+        #     elif self.spec_augment == "ls-basic":
+        #         mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
+        #     else:
+        #         raise NotImplementedError 
 
         dec_input_ids = [self.tokenizer.sot, 
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
@@ -121,14 +126,11 @@ class YTTDTaigiTRSDataset(Dataset):
 
         # 使用 BasicTextNormalizer 正規化文本
         mandarin_text = self.text_normalizer(mandarin_text)
-        # print("mandarin_text :", mandarin_text)
         mandarin_text = [self.tokenizer.sot,
                             self.tokenizer.special_tokens["<|{}|>".format(lang)],
                             self.tokenizer.transcribe, 
                             self.tokenizer.no_timestamps] + \
                             self.tokenizer.encode(" " + mandarin_text)
-        # print("mandarin_text :", mandarin_text)
-        # print("mandarin_text's shape :", mandarin_text.shape)
         # 截斷 translated_text 以符合 self.n_ctx 的限制
         # if len(translated_text) > self.n_ctx:
         #     translated_text = translated_text[:self.n_ctx]    
@@ -153,18 +155,21 @@ class WhisperTextModule(LightningModule):
                                         device='cpu', # avoid OOM on gpu 0 for distributed
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                         dropout_rate=cfg.dropout_rate,
-                                        add_gated_x_attn=cfg.add_gated_x_attn,)
-        
+                                        add_gated_x_attn=cfg.add_gated_x_attn,
+                                        add_resnet= cfg.add_resnet,
+                                        num_resnet_layer=cfg.num_resnet_layer,
+                                        )
+            
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
             state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
             state_dict = state_dict['state_dict']
             state_dict_updated = {k[6:]: v  for k, v in state_dict.items()} # remove 'model.'
-            print(state_dict_updated.keys())
+            # print(state_dict_updated.keys())
             try:
                 self.model.load_state_dict(state_dict_updated) 
             except BaseException as e: 
-                print(str(e))
+                # print(str(e))
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
                 
@@ -182,7 +187,7 @@ class WhisperTextModule(LightningModule):
 
     def forward(self, x):
         return self.model(x)
-
+    
     def training_step(self, batch, batch_id):
         
         input_ids = batch["input_ids"]
@@ -190,9 +195,9 @@ class WhisperTextModule(LightningModule):
         dec_input_ids = batch["dec_input_ids"].long()
         translated_text = batch["translated_text"].long()
 
-        if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
-            for p in self.model.encoder.parameters():
-                p.requires_grad = False
+        # if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
+        #     for p in self.model.encoder.parameters():
+        #         p.requires_grad = False
 
         # if 'large' in self.model_name: # only decoder training, NOTE: be careful with linear layer here
         #     with torch.no_grad():
@@ -206,7 +211,7 @@ class WhisperTextModule(LightningModule):
         
         return loss
             
-    def validation_step(self, batch, batch_id, dataloader_idx=None):
+    def validation_step(self, batch, batch_id, dataloader_idx=None):              
         
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
@@ -219,7 +224,6 @@ class WhisperTextModule(LightningModule):
 
         labels[labels == -100] = self.tokenizer.eot
 
-        # mod_list = {"at": out_at, "a": out_a, "t": out_t} if cfg.add_gated_x_attn == 0 else {"at": out_at}
         mod_list = {"at": out_at}
         for mod, out in mod_list.items():
             loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
@@ -263,7 +267,7 @@ class WhisperTextModule(LightningModule):
         
             print("Mod: {}".format(mod))
             for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
-                print("-"*10)
+                print("="*100)
                 print("PRED: {}".format(hypo))
                 # print(hypo_full)
                 print("REF:  {}".format(ref))
@@ -361,10 +365,15 @@ if __name__ == "__main__":
     print("audio max length: {}".format(cfg.audio_max_length))
 
     # Initialize WandB
-    # wandb.init(project="whisper-flamingo",
-    #         config=cfg,
-    #         name="whisper-flamingo taigi small(batch_szie=4, num_train_steps=360k)",
-    # )
+    wandb.init(project="whisper-flamingo",
+            config=cfg,
+            # name="whisper-flamingo taigi small ",
+            # name="whisper-flamingo taigi small + ResNet-4 ",
+            # name="whisper-flamingo taigi small + ResNet-8 ",
+            # name="whisper-flamingo taigi small + ResNet-16 ",
+            name="whisper-flamingo taigi small + ResNet-32 ",
+            # name="whisper-flamingo taigi small + ResNet-64 ",
+    )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
                                                                                     cfg.check_output_dir, 
@@ -376,7 +385,7 @@ if __name__ == "__main__":
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
     
     # Create a WandB logger instance
-    # wandb_logger = WandbLogger()
+    wandb_logger = WandbLogger()
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -385,8 +394,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        logger=tflogger,
-        # logger=wandb_logger,
+        # logger=tflogger,
+        logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
@@ -406,7 +415,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
-    # wandb.finish()
+    wandb.finish()
