@@ -151,9 +151,7 @@ class ResidualAttentionBlock(nn.Module):
         return x
     
     def apply_gated_x_attn_2(self, x, xt_1, xt_2):
-        # 對第一種語言的特徵進行門控交叉注意力融合
         x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0] * self.attn_gate_1.tanh()
-        # 對第二種語言的特徵進行門控交叉注意力融合
         x_2 = self.gated_x_attn_2(self.gated_x_attn_ln_2(x), xt_2)[0] * self.attn_gate_2.tanh()
         x = x + x_1 + x_2
         x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
@@ -257,8 +255,8 @@ class AudioEncoder(nn.Module):
 
 class TextDecoder(nn.Module):
     def __init__(
-        self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float,
-        add_gated_x_attn: int, bert_encoder: bool, bert_hidden_size: int, add_resnet: bool, num_resnet_layer: int,
+        self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float, add_gated_x_attn: int,
+        bert_encoder: bool, bert_hidden_size: int, add_resnet: bool, num_resnet_layer: int, mode: str,
     ):
         super().__init__()
 
@@ -288,9 +286,10 @@ class TextDecoder(nn.Module):
         self.add_resnet = add_resnet
         if add_resnet:
             self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
+        self.mode = mode
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
-                xv: Optional[Tensor] = None, xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None):
+                xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens
@@ -303,32 +302,53 @@ class TextDecoder(nn.Module):
             self.token_embedding(x)
             + self.positional_embedding[offset : offset + x.shape[-1]]
         )
-        
         x = x.to(xa.dtype)
-        
-        # 定義處理 xt_1 和 xt_2 的邏輯函數
-        def process_xt(xt, offset, bert_encoder, projection, x, positional_embedding, dtype):
-            if not bert_encoder:
-                xt = self.token_embedding(xt) + positional_embedding[offset : offset + xt.shape[-1]]
+
+        # Process xt_1 and xt_2 based on the specified mode
+        if self.mode == "mix":
+            # xt_1 without BERT and without positional embedding
+            if xt_1 is not None:
+                xt_1 = self.token_embedding(xt_1)
                 if self.add_resnet:
-                    xt = self.resnet(xt)
-            else:
-                if xt.shape[-1] != x.shape[-1]:
-                    xt = projection(xt)
-                xt = xt + positional_embedding[offset : offset + xt.shape[1]]
-            return xt.to(dtype)
+                    xt_1 = self.resnet(xt_1)
+                # No positional embedding for xt_1 in "mix" mode
+                xt_1 = xt_1.to(xa.dtype)
+
+            # xt_2 with BERT and positional embedding
+            if xt_2 is not None:
+                if xt_2.shape[-1] != x.shape[-1]:
+                    xt_2 = self.xt_projection(xt_2)
+                xt_2 = xt_2 + self.positional_embedding[offset: offset + xt_2.shape[1]]
+                xt_2 = xt_2.to(xa.dtype)
+        elif self.mode == "translation":
+            # xt_1 with BERT and positional embedding
+            if xt_1 is not None:
+                if xt_1.shape[-1] != x.shape[-1]:
+                    xt_1 = self.xt_projection(xt_1)
+                xt_1 = xt_1 + self.positional_embedding[offset: offset + xt_1.shape[1]]
+                xt_1 = xt_1.to(xa.dtype)
+        elif self.mode == "keyword":
+            # xt_1 without BERT and without positional embedding
+            if xt_1 is not None:
+                xt_1 = self.token_embedding(xt_1)
+                if self.add_resnet:
+                    xt_1 = self.resnet(xt_1)
+                # No positional embedding for xt_1 in "keyword" mode
+                xt_1 = xt_1.to(xa.dtype)
+
+            # xt_2 remains None
+            xt_2 = None
+        else:
+            raise ValueError("Please specify the mode.")
         
-        if xt_1 is not None:
-            xt_1 = process_xt(xt_1, offset, self.bert_encoder, self.xt_projection, x, self.positional_embedding, xa.dtype)
-        
-        if xt_2 is not None:
-            xt_2 = process_xt(xt_2, offset, self.bert_encoder, self.xt_projection, x, self.positional_embedding, xa.dtype)
-        
+        # Pass through the layers
         for layer, block in enumerate(self.blocks):
             x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt_1=xt_1, xt_2=xt_2)
-            
+        
+        # Apply layer normalization
         x = self.ln(x)
         
+        # Calculate logits
         logits = (
             x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)
         ).float()
@@ -339,7 +359,7 @@ class Whisper(nn.Module):
     def __init__(self, dims: ModelDimensions, dropout_rate: float, video: bool, 
                  video_model_path: str, av_hubert_path: str, prob_av: float, prob_a: float, av_hubert_encoder: bool,
                  av_fusion: str, add_adapter: bool, adapter_dim: int, add_gated_x_attn: int, 
-                 bert_encoder: bool, add_resnet: bool, num_resnet_layer: int,):
+                 bert_encoder: bool, bert_dim: int, add_resnet: bool, num_resnet_layer: int, mode: str,):
         super().__init__()
         self.dims = dims
         self.encoder = AudioEncoder(
@@ -368,9 +388,10 @@ class Whisper(nn.Module):
             dropout_rate,
             add_gated_x_attn,
             bert_encoder,
-            768,
+            bert_dim,
             add_resnet,
             num_resnet_layer,
+            mode,
         )
 
     def embed_audio(self, mel: torch.Tensor):

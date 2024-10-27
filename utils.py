@@ -479,6 +479,53 @@ class WhisperTextCollatorWhithPadding_taigi_with_bert:
 
         return batch
 
+class WhisperTextCollatorWhithPadding_taigi_mix:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, translations, keywords, wav_lens = [], [], [], [], [], []
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            translations.append(f["translation"])
+            keywords.append(f["keywords"])
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+        
+        keywords_lengths = [len(t) for t in keywords]
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                  for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                         for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
+
+        # 為 keywords 添加 padding，如有需要
+        max_keyword_len = max(keywords_lengths)
+        keywords = [np.pad(t, (0, max_keyword_len - t_len), 'constant', constant_values=50257) 
+                    for t, t_len in zip(keywords, keywords_lengths)]
+        
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "keywords": keywords,
+            "translations": translations,
+            "wav_lens": wav_lens  # Add wav_lens to the batch
+        }
+        
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "labels", "dec_input_ids", "keywords", "wav_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
+
 class WhisperTextCollatorWhithPadding_librispeech_without_bert:
     def __call__(self, features):
         input_ids, labels, dec_input_ids, translated_texts_1, translated_texts_2, wav_lens, audio = [], [], [], [], [], [], []
@@ -836,42 +883,7 @@ def setup_logging_and_checkpoint_taigi(log_output_dir, check_output_dir, train_n
     
     val_checkpoint = ModelCheckpoint(
         dirpath=f"{check_output_dir}/{train_id}",
-        # filename="step-{step:05d}-cer={val/cer:.4f}-wer={val/wer:.4f}",
         filename=filename,
-        monitor=monitor,
-        mode='min',
-        save_top_k=1,
-        auto_insert_metric_name=False,
-    )
-
-    callback_list = [val_checkpoint,
-                     LearningRateMonitor(logging_interval="step")]
-    return tflogger, checkpoint_callback, callback_list
-
-def setup_logging_and_checkpoint_taigi_text(log_output_dir, check_output_dir, train_name, train_id, monitor):
-    Path(log_output_dir).mkdir(exist_ok=True)
-    Path(check_output_dir).mkdir(exist_ok=True)
-
-    tflogger = TensorBoardLogger(
-        save_dir=log_output_dir,
-        name=train_name,
-        version=train_id
-    )
-
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f"{check_output_dir}/{train_id}",
-        filename="step-{step:05d}-wer={val/wer:.4f}-acc={val/acc:.4f}",
-        monitor=monitor,
-        mode='max',
-        save_top_k=1,
-        save_last=True,
-        auto_insert_metric_name=False,
-    )
-    
-    val_checkpoint = ModelCheckpoint(
-        dirpath=f"{check_output_dir}/{train_id}",
-        # filename="step-{step:05d}-cer={dev-other/cer:.4f}-wer={dev-other/wer:.4f}",
-        filename="step-{step:05d}-cer={val/cer_at:.4f}-wer={val/wer_at:.4f}",
         monitor=monitor,
         mode='min',
         save_top_k=1,
@@ -1128,17 +1140,17 @@ def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, a
 
     return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
 
-def get_all_keywords(mandarin_text):
+def get_all_keywords(mandarin_text, dictionary, separate=False):
     mandarin_text = mandarin_text
-    print("mandarin_text :", mandarin_text)
+    # print("mandarin_text :", mandarin_text)
 
     # 句子斷詞
     mandarin_text_list = mandarin_text.split()
-    print("mandarin_text_list :", mandarin_text_list)
+    # print("mandarin_text_list :", mandarin_text_list)
 
-    # 讀取您的 JSON 華台辭典
-    with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
-        dictionary = json.load(f)
+    # # 讀取您的 JSON 華台辭典
+    # with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
+    #     dictionary = json.load(f)
 
     # 初始化一個空的列表來存放所有查詢結果
     all_keywords = []
@@ -1146,13 +1158,17 @@ def get_all_keywords(mandarin_text):
     # 查找每個詞彙是否有華台翻譯，並將所有翻譯加入 all_keywords
     for word in mandarin_text_list:
         if word in dictionary:
-            print(f"word: {word}, keywords: {dictionary[word]}")
+            # print(f"word: {word}, keywords: {dictionary[word]}")
             all_keywords.extend(dictionary[word])  # 再加入所有翻譯
 
-    print("all_keywords list:", all_keywords)
+    if separate == True:
+        # print("all_keywords list:", all_keywords)
+        return all_keywords
+    
+    # print("all_keywords list:", all_keywords)
     all_keywords = "".join(all_keywords)
     
     # 輸出結果，列出所有原詞與其翻譯
-    print("all_keywords string:", all_keywords)
+    # print("all_keywords string:", all_keywords)
     
     return all_keywords

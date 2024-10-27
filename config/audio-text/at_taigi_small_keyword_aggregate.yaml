@@ -27,14 +27,16 @@ lang: zh
 resume_training: False
 
 pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
-train_id: whisbert-flamingo_taigi_small_keyword
+train_id: whisbert-flamingo_taigi_small_keyword_aggregate
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
+bert_encoder: True
 add_resnet: False
 num_resnet_layer: 0
+mode: "mix"
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
