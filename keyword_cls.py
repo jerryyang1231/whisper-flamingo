@@ -12,14 +12,13 @@ import whisper
 import argparse
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
-# from pytorch_lightning.cli import LightningCLI
 from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
-    WhisperTextCollatorWhithPadding_taigi_mix,
+    WhisperTextCollatorWhithPadding_taigi_cls,
     whisper_optimizer,
     whisper_flamingo_optimizer,
     setup_logging_and_checkpoint_taigi,
@@ -36,7 +35,7 @@ from transformers import BertModel, BertTokenizer
 import json
 
 # my command
-# python -u keyword_separate.py config/audio-text/at_taigi_small_keyword_separate.yaml
+# python -u keyword_cls.py config/audio-text/at_taigi_small_keyword_cls.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -74,7 +73,6 @@ class YTTDTaigiTRSDataset(Dataset):
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
-        # self.n_ctx = 448
         self.dictionary = dictionary  # 儲存辭典以便後續使用
 
     def __len__(self):
@@ -109,13 +107,13 @@ class YTTDTaigiTRSDataset(Dataset):
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
             
-        # if self.spec_augment:
-        #     if self.spec_augment == "ls-double":
-        #         mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
-        #     elif self.spec_augment == "ls-basic":
-        #         mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
-        #     else:
-        #         raise NotImplementedError 
+        if self.spec_augment:
+            if self.spec_augment == "ls-double":
+                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
+            elif self.spec_augment == "ls-basic":
+                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
+            else:
+                raise NotImplementedError 
 
         dec_input_ids = [self.tokenizer.sot, 
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
@@ -128,31 +126,12 @@ class YTTDTaigiTRSDataset(Dataset):
         # 使用 BasicTextNormalizer 正規化文本
         mandarin_text = self.text_normalizer(mandarin_text)
 
-        # 對每個 keyword 逐個 tokenize，並將結果合併
-        all_keywords_tokens = []
-        for keyword in all_keywords:
-            tokens = self.tokenizer.encode(keyword)  # 對每個 keyword 單獨 tokenize
-            all_keywords_tokens.extend(tokens)  # 將 tokenize 的結果添加到 all_keywords_tokens 中
-        # print("all_keywords_tokens:", all_keywords_tokens)
-        
-        # 將列表轉換為 set 去重
-        unique_keywords_tokens = set(all_keywords_tokens)
-        # 再將 set 轉回 list
-        unique_keywords_tokens = list(unique_keywords_tokens)
-        
-        # 輸出結果
-        # print("unique_keywords_tokens :", unique_keywords_tokens)
-
-        # 截斷 translated_text 以符合 self.n_ctx 的限制
-        # if len(translated_text) > self.n_ctx:
-        #     translated_text = translated_text[:self.n_ctx]    
-        
         return {
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "keywords": unique_keywords_tokens,
-            "translation": mandarin_text,
+            "keywords": all_keywords,
+            "translations": mandarin_text,
             "wav_lens": wav_lens
         }
 
@@ -199,7 +178,7 @@ class WhisperTextModule(LightningModule):
         
         # 初始化 BERT 分詞器和模型
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-        self.bert_model = BertModel.from_pretrained('bert-base-chinese')
+        self.bert_model = BertModel.from_pretrained('bert-base-chinese').to(self.device)
 
 
     def forward(self, x):
@@ -210,11 +189,56 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        keywords = batch["keywords"].long()
-        translations = batch["translations"]  # 保持為文本列表
+        keywords_list = batch["keywords"] # List[List[str]]
+        translations = batch["translations"]  # List[str]
+
+        # 處理每個樣本的關鍵詞
+        keyword_embeddings_list = []
+        for keywords in keywords_list:
+            if keywords:
+                # 對該樣本的關鍵詞進行 BERT 編碼
+                bert_inputs_1 = self.bert_tokenizer(
+                    keywords,
+                    add_special_tokens=True,
+                    padding=True,
+                    truncation=True,
+                    return_tensors='pt'
+                ).to(self.device)
+
+                bert_outputs = self.bert_model(**bert_inputs_1)
+                bert_hidden_states = bert_outputs.last_hidden_state  # [num_keywords, sequence_length, hidden_size]
+                cls_embeddings = bert_outputs.last_hidden_state[:, 0, :]  # [num_keywords, hidden_size]
+                keyword_embeddings_list.append(cls_embeddings)
+            else:
+                # 如果沒有關鍵詞，添加一個全零的嵌入
+                cls_embeddings = torch.zeros(1, self.bert_model.config.hidden_size).to(self.device)
+                keyword_embeddings_list.append(cls_embeddings)
+        
+        # 填充關鍵詞嵌入
+        max_num_keywords = max([emb.shape[0] for emb in keyword_embeddings_list])
+        padded_keyword_embeddings = []
+        attention_masks = []
+        for emb in keyword_embeddings_list:
+            num_keywords = emb.shape[0]
+            if num_keywords < max_num_keywords:
+                pad_size = max_num_keywords - num_keywords
+                pad_emb = torch.zeros(pad_size, emb.shape[1]).to(self.device)
+                emb = torch.cat([emb, pad_emb], dim=0)
+                attention_mask = torch.cat([torch.ones(num_keywords), torch.zeros(pad_size)]).to(self.device)
+            else:
+                attention_mask = torch.ones(max_num_keywords).to(self.device)
+            padded_keyword_embeddings.append(emb)
+            attention_masks.append(attention_mask)
+            
+        # 將列表轉換為張量
+        keyword_embeddings = torch.stack(padded_keyword_embeddings, dim=0)  # [batch_size, max_num_keywords, hidden_size]
+        keyword_attention_mask = torch.stack(attention_masks, dim=0)  # [batch_size, max_num_keywords]
+        # # 將注意力遮罩轉換為適當的形狀
+        # keyword_attention_mask = keyword_attention_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, max_num_keywords]
+        # keyword_attention_mask = (1.0 - keyword_attention_mask) * -1e9  # 將有效位置設為0，填充位置設為 -1e9
 
         # 使用 BERT 分詞器對文本進行編碼
-        bert_inputs = self.bert_tokenizer(
+        bert_inputs_2 = self.bert_tokenizer(
             translations,
             return_tensors='pt',
             padding=True,
@@ -223,8 +247,8 @@ class WhisperTextModule(LightningModule):
         ).to(self.device)
         
         # 通過 BERT 模型獲取輸出
-        bert_outputs = self.bert_model(**bert_inputs)
-        bert_hidden_states = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        bert_outputs_2 = self.bert_model(**bert_inputs_2)
+        translation_embeddings = bert_outputs_2.last_hidden_state  # [batch_size, seq_len, hidden_size]
         
         if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
             for p in self.model.encoder.parameters():
@@ -237,7 +261,7 @@ class WhisperTextModule(LightningModule):
         features = self.model.encoder(input_ids, training=True)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
-        out = self.model.decoder(dec_input_ids, features, xt_1=keywords, xt_2=bert_hidden_states)
+        out = self.model.decoder(dec_input_ids, features, xt_1=keyword_embeddings, xt_2=translation_embeddings)
         
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
@@ -249,11 +273,56 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        keywords = batch["keywords"].long()
-        translations = batch["translations"]  # 保持為文本列表
+        keywords_list = batch["keywords"] # List[List[str]]
+        translations = batch["translations"]  # List[str]
+
+        # 處理每個樣本的關鍵詞
+        keyword_embeddings_list = []
+        for keywords in keywords_list:
+            if keywords:
+                # 對該樣本的關鍵詞進行 BERT 編碼
+                bert_inputs_1 = self.bert_tokenizer(
+                    keywords,
+                    add_special_tokens=True,
+                    padding=True,
+                    truncation=True,
+                    return_tensors='pt'
+                ).to(self.device)
+                
+                bert_outputs = self.bert_model(**bert_inputs_1)
+                bert_hidden_states = bert_outputs.last_hidden_state  # [num_keywords, sequence_length, hidden_size]
+                cls_embeddings = bert_outputs.last_hidden_state[:, 0, :]  # [num_keywords, hidden_size]
+                keyword_embeddings_list.append(cls_embeddings)
+            else:
+                # 如果沒有關鍵詞，添加一個全零的嵌入
+                cls_embeddings = torch.zeros(1, self.bert_model.config.hidden_size).to(self.device)
+                keyword_embeddings_list.append(cls_embeddings)
+        
+        # 填充關鍵詞嵌入
+        max_num_keywords = max([emb.shape[0] for emb in keyword_embeddings_list])
+        padded_keyword_embeddings = []
+        attention_masks = []
+        for emb in keyword_embeddings_list:
+            num_keywords = emb.shape[0]
+            if num_keywords < max_num_keywords:
+                pad_size = max_num_keywords - num_keywords
+                pad_emb = torch.zeros(pad_size, emb.shape[1]).to(self.device)
+                emb = torch.cat([emb, pad_emb], dim=0)
+                attention_mask = torch.cat([torch.ones(num_keywords), torch.zeros(pad_size)]).to(self.device)
+            else:
+                attention_mask = torch.ones(max_num_keywords).to(self.device)
+            padded_keyword_embeddings.append(emb)
+            attention_masks.append(attention_mask)
+            
+        # 將列表轉換為張量
+        keyword_embeddings = torch.stack(padded_keyword_embeddings, dim=0)  # [batch_size, max_num_keywords, hidden_size]
+        keyword_attention_mask = torch.stack(attention_masks, dim=0)  # [batch_size, max_num_keywords]
+        # # 將注意力遮罩轉換為適當的形狀
+        # keyword_attention_mask = keyword_attention_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, max_num_keywords]
+        # keyword_attention_mask = (1.0 - keyword_attention_mask) * -1e9  # 將有效位置設為0，填充位置設為 -1e9
 
         # 使用 BERT 分詞器對文本進行編碼
-        bert_inputs = self.bert_tokenizer(
+        bert_inputs_2 = self.bert_tokenizer(
             translations,
             return_tensors='pt',
             padding=True,
@@ -262,13 +331,13 @@ class WhisperTextModule(LightningModule):
         ).to(self.device)
         
         # 通過 BERT 模型獲取輸出
-        bert_outputs = self.bert_model(**bert_inputs)
-        bert_hidden_states = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        bert_outputs_2 = self.bert_model(**bert_inputs_2)
+        translation_embeddings = bert_outputs_2.last_hidden_state  # [batch_size, seq_len, hidden_size]
         
         features_a = self.model.encoder(input_ids)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
-        out_at = self.model.decoder(dec_input_ids, features_a, xt_1=keywords, xt_2=bert_hidden_states)
+        out_at = self.model.decoder(dec_input_ids, features_a, xt_1=keyword_embeddings, xt_2=translation_embeddings)
 
         labels[labels == -100] = self.tokenizer.eot
 
@@ -364,7 +433,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_mix())
+                          collate_fn=WhisperTextCollatorWhithPadding_taigi_cls())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -384,7 +453,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_mix())
+                          collate_fn=WhisperTextCollatorWhithPadding_taigi_cls())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -404,7 +473,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_mix())
+                          collate_fn=WhisperTextCollatorWhithPadding_taigi_cls())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -421,7 +490,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small mix (separate)",
+            name="whisbert-flamingo taigi small mix (cls)",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 

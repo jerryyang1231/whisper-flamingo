@@ -165,7 +165,7 @@ class ResidualAttentionBlock(nn.Module):
         kv_cache: Optional[dict] = None,
         xv: Optional[Tensor] = None,
         xt_1: Optional[Tensor] = None,
-        xt_2: Optional[Tensor] = None,
+        xt_2: Optional[Tensor] = None
     ):
         if self.add_gated_x_attn != 0: 
             if xt_2 is not None:
@@ -338,8 +338,20 @@ class TextDecoder(nn.Module):
 
             # xt_2 remains None
             xt_2 = None
-        else:
-            raise ValueError("Please specify the mode.")
+        elif self.mode == "cls":
+            # xt_1 with BERT and without positional embedding
+            if xt_1 is not None:
+                if xt_1.shape[-1] != x.shape[-1]:
+                    xt_1 = self.xt_projection(xt_1)
+                # No positional embedding for xt_1 in "cls" mode
+                xt_1 = xt_1.to(xa.dtype)
+                
+            # xt_2 with BERT and positional embedding
+            if xt_2 is not None:
+                if xt_2.shape[-1] != x.shape[-1]:
+                    xt_2 = self.xt_projection(xt_2)
+                xt_2 = xt_2 + self.positional_embedding[offset: offset + xt_2.shape[1]]
+                xt_2 = xt_2.to(xa.dtype)
         
         # Pass through the layers
         for layer, block in enumerate(self.blocks):

@@ -1,27 +1,28 @@
-import json
+from transformers import BertTokenizer
 
-# 假設的句子
-mandarin_text = "你 為什麼 要 自作主張"
-print("華文 :", mandarin_text)
+# 加載 BERT 分詞器
+tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
 
-# 句子斷詞
-mandarin_text_list = mandarin_text.split()
-print("華文列表:", mandarin_text_list)
+# 定義測試句子
+sequence = "Titan"
 
-# 讀取您的 JSON 華台辭典
-with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
-    dictionary = json.load(f)
+# 分詞後的結果（不含特殊標記）
+tokenized_sequence = tokenizer.tokenize(sequence)
+print("Tokenized sequence (without special tokens):", tokenized_sequence)
 
-# 初始化一個空的列表來存放所有查詢結果
-all_keywords = []
+# 編碼後的結果（自動添加了特殊標記）
+inputs = tokenizer(sequence, return_tensors="pt")
+print("inputs :", inputs)
+encoded_sequence = inputs["input_ids"][0]  # 取得 tensor 的第一個 batch
+print("Encoded sequence (with special tokens):", encoded_sequence.tolist())
 
-# 查找每個詞彙是否有華台翻譯，並將所有翻譯加入 all_keywords
-for word in mandarin_text_list:
-    if word in dictionary:
-        print(f"詞語: {word}, 華台翻譯: {dictionary[word]}")
-        # all_keywords.append(word)  # 先加入原始詞
-        all_keywords.extend(dictionary[word])  # 再加入所有翻譯
+# 將編碼結果解碼回句子
+decoded_sequence = tokenizer.decode(encoded_sequence)
+print("Decoded sequence:", decoded_sequence)
 
-all_keywords = "".join(all_keywords)
-# 輸出結果，列出所有原詞與其翻譯
-print("所有關鍵詞與翻譯合併:", all_keywords)
+# 獲取 [CLS] 和 [SEP] 的 token ID
+cls_token_id = tokenizer.cls_token_id
+sep_token_id = tokenizer.sep_token_id
+
+print(f"[CLS] token ID: {cls_token_id}")  # 預期輸出 101
+print(f"[SEP] token ID: {sep_token_id}")  # 預期輸出 102

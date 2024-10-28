@@ -260,7 +260,6 @@ class WhisperTextModule(LightningModule):
         # 通過 BERT 模型獲取輸出
         bert_outputs = self.bert_model(**bert_inputs)
         bert_hidden_states = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
-        
         features_a = self.model.encoder(input_ids)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
@@ -416,10 +415,10 @@ if __name__ == "__main__":
         dictionary = json.load(f)
 
     # Initialize WandB
-    wandb.init(project="whisper-flamingo",
-            config=cfg,
-            name="whisbert-flamingo taigi small mix (aggregate)",
-    )
+    # wandb.init(project="whisper-flamingo",
+    #         config=cfg,
+    #         name="whisbert-flamingo taigi small mix (aggregate)",
+    # )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
                                                                                     cfg.check_output_dir, 
@@ -431,7 +430,7 @@ if __name__ == "__main__":
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
     
     # Create a WandB logger instance
-    wandb_logger = WandbLogger()
+    # wandb_logger = WandbLogger()
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -440,8 +439,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
-        logger=wandb_logger,
+        logger=tflogger,
+        # logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
@@ -461,8 +460,8 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
-    wandb.finish()
+    # wandb.finish()
     

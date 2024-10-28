@@ -525,6 +525,46 @@ class WhisperTextCollatorWhithPadding_taigi_mix:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
 
         return batch
+    
+class WhisperTextCollatorWhithPadding_taigi_cls:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, translations, keywords, wav_lens = [], [], [], [], [], []
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            translations.append(f["translations"])
+            keywords.append(f["keywords"])
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                  for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                         for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
+        
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "keywords": keywords,
+            "translations": translations,
+            "wav_lens": wav_lens  # Add wav_lens to the batch
+        }
+        
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
 
 class WhisperTextCollatorWhithPadding_librispeech_without_bert:
     def __call__(self, features):
@@ -1147,10 +1187,6 @@ def get_all_keywords(mandarin_text, dictionary, separate=False):
     # 句子斷詞
     mandarin_text_list = mandarin_text.split()
     # print("mandarin_text_list :", mandarin_text_list)
-
-    # # 讀取您的 JSON 華台辭典
-    # with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
-    #     dictionary = json.load(f)
 
     # 初始化一個空的列表來存放所有查詢結果
     all_keywords = []
