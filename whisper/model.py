@@ -328,12 +328,11 @@ class TextDecoder(nn.Module):
                 xt_1 = xt_1 + self.positional_embedding[offset: offset + xt_1.shape[1]]
                 xt_1 = xt_1.to(xa.dtype)
         elif self.mode == "keyword":
-            # xt_1 without BERT and without positional embedding
+            # xt_1 with BERT and without positional embedding
             if xt_1 is not None:
-                xt_1 = self.token_embedding(xt_1)
-                if self.add_resnet:
-                    xt_1 = self.resnet(xt_1)
-                # No positional embedding for xt_1 in "keyword" mode
+                if xt_1.shape[-1] != x.shape[-1]:
+                    xt_1 = self.xt_projection(xt_1)
+                # No positional embedding for xt_1 in "cls" mode
                 xt_1 = xt_1.to(xa.dtype)
 
             # xt_2 remains None

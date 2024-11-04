@@ -12,7 +12,6 @@ import whisper
 import argparse
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
-# from pytorch_lightning.cli import LightningCLI
 from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
@@ -34,7 +33,7 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 
 # my command
-# CUDA_VISIBLE_DEVICES=1 python -u whisbert_flamingo_taigi.py config/audio-text/at_taigi_small.yaml
+# CUDA_VISIBLE_DEVICES=0 python -u whisbert_flamingo_taigi.py config/audio-text/at_taigi_small.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -72,7 +71,6 @@ class YTTDTaigiTRSDataset(Dataset):
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
-        # self.n_ctx = 448
 
     def __len__(self):
         return len(self.dataset)
@@ -91,7 +89,6 @@ class YTTDTaigiTRSDataset(Dataset):
         text = self.text_normalizer(text)
         # 移除空格
         text = text.replace(" ", "")
-        mandarin_text = mandarin_text.replace(" ", "")
         
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
@@ -120,14 +117,9 @@ class YTTDTaigiTRSDataset(Dataset):
                         self.tokenizer.encode(" " + text)       
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
 
+        mandarin_text = mandarin_text.replace(" ", "")
         # 使用 BasicTextNormalizer 正規化文本
         mandarin_text = self.text_normalizer(mandarin_text)
-        # print("mandarin_text :", mandarin_text)
-        
-        # 截斷 translated_text 以符合 self.n_ctx 的限制
-        # if len(translated_text) > self.n_ctx:
-        #     translated_text = translated_text[:self.n_ctx]    
-        
         return {
             "input_ids": mel,
             "labels": labels,
@@ -179,7 +171,8 @@ class WhisperTextModule(LightningModule):
         
         # 初始化 BERT 分詞器和模型
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-        self.bert_model = BertModel.from_pretrained('bert-base-chinese')
+        self.bert_model = BertModel.from_pretrained('bert-base-chinese').to(self.device)
+
 
     def forward(self, x):
         return self.model(x)
@@ -390,10 +383,10 @@ if __name__ == "__main__":
     print("audio max length: {}".format(cfg.audio_max_length))
 
     # Initialize WandB
-    # wandb.init(project="whisper-flamingo",
-    #         config=cfg,
-    #         name="whisbert-flamingo taigi small (num_train_steps = 360k)",
-    # )
+    wandb.init(project="whisper-flamingo",
+            config=cfg,
+            name="whisbert-flamingo taigi small reproduce",
+    )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
                                                                                     cfg.check_output_dir, 
@@ -405,7 +398,7 @@ if __name__ == "__main__":
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
     
     # Create a WandB logger instance
-    # wandb_logger = WandbLogger()
+    wandb_logger = WandbLogger()
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -414,8 +407,8 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        logger=tflogger,
-        # logger=wandb_logger,
+        # logger=tflogger,
+        logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
@@ -438,4 +431,4 @@ if __name__ == "__main__":
         trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
-    # wandb.finish()
+    wandb.finish()

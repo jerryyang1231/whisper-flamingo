@@ -28,6 +28,7 @@ from utils import (
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
@@ -36,6 +37,7 @@ import json
 
 # my command
 # python -u keyword_cls.py config/audio-text/at_taigi_small_keyword_cls.yaml
+# python -u keyword_cls.py config/audio-text/at_taigi_small_keyword.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -217,27 +219,24 @@ class WhisperTextModule(LightningModule):
         # 填充關鍵詞嵌入
         max_num_keywords = max([emb.shape[0] for emb in keyword_embeddings_list])
         padded_keyword_embeddings = []
-        attention_masks = []
+        # attention_masks = []
         for emb in keyword_embeddings_list:
             num_keywords = emb.shape[0]
             if num_keywords < max_num_keywords:
                 pad_size = max_num_keywords - num_keywords
                 pad_emb = torch.zeros(pad_size, emb.shape[1]).to(self.device)
                 emb = torch.cat([emb, pad_emb], dim=0)
-                attention_mask = torch.cat([torch.ones(num_keywords), torch.zeros(pad_size)]).to(self.device)
-            else:
-                attention_mask = torch.ones(max_num_keywords).to(self.device)
+                # attention_mask = torch.cat([torch.ones(num_keywords), torch.zeros(pad_size)]).to(self.device)
+            # else:
+                # attention_mask = torch.ones(max_num_keywords).to(self.device)
             padded_keyword_embeddings.append(emb)
-            attention_masks.append(attention_mask)
+            # attention_masks.append(attention_mask)
             
         # 將列表轉換為張量
         keyword_embeddings = torch.stack(padded_keyword_embeddings, dim=0)  # [batch_size, max_num_keywords, hidden_size]
-        keyword_attention_mask = torch.stack(attention_masks, dim=0)  # [batch_size, max_num_keywords]
-        # # 將注意力遮罩轉換為適當的形狀
-        # keyword_attention_mask = keyword_attention_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, max_num_keywords]
-        # keyword_attention_mask = (1.0 - keyword_attention_mask) * -1e9  # 將有效位置設為0，填充位置設為 -1e9
+        # keyword_attention_mask = torch.stack(attention_masks, dim=0)  # [batch_size, max_num_keywords]
 
-        # 使用 BERT 分詞器對文本進行編碼
+        # 使用 BERT 分詞器對翻譯文本進行編碼
         bert_inputs_2 = self.bert_tokenizer(
             translations,
             return_tensors='pt',
@@ -301,25 +300,22 @@ class WhisperTextModule(LightningModule):
         # 填充關鍵詞嵌入
         max_num_keywords = max([emb.shape[0] for emb in keyword_embeddings_list])
         padded_keyword_embeddings = []
-        attention_masks = []
+        # attention_masks = []
         for emb in keyword_embeddings_list:
             num_keywords = emb.shape[0]
             if num_keywords < max_num_keywords:
                 pad_size = max_num_keywords - num_keywords
                 pad_emb = torch.zeros(pad_size, emb.shape[1]).to(self.device)
                 emb = torch.cat([emb, pad_emb], dim=0)
-                attention_mask = torch.cat([torch.ones(num_keywords), torch.zeros(pad_size)]).to(self.device)
-            else:
-                attention_mask = torch.ones(max_num_keywords).to(self.device)
+                # attention_mask = torch.cat([torch.ones(num_keywords), torch.zeros(pad_size)]).to(self.device)
+            # else:
+                # attention_mask = torch.ones(max_num_keywords).to(self.device)
             padded_keyword_embeddings.append(emb)
-            attention_masks.append(attention_mask)
+            # attention_masks.append(attention_mask)
             
         # 將列表轉換為張量
         keyword_embeddings = torch.stack(padded_keyword_embeddings, dim=0)  # [batch_size, max_num_keywords, hidden_size]
-        keyword_attention_mask = torch.stack(attention_masks, dim=0)  # [batch_size, max_num_keywords]
-        # # 將注意力遮罩轉換為適當的形狀
-        # keyword_attention_mask = keyword_attention_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, max_num_keywords]
-        # keyword_attention_mask = (1.0 - keyword_attention_mask) * -1e9  # 將有效位置設為0，填充位置設為 -1e9
+        # keyword_attention_mask = torch.stack(attention_masks, dim=0)  # [batch_size, max_num_keywords]
 
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs_2 = self.bert_tokenizer(
@@ -490,7 +486,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small mix (cls)",
+            name="whisbert-flamingo taigi small keyword (cls)",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 

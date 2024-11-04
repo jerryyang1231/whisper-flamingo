@@ -12,7 +12,6 @@ import whisper
 import argparse
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
-# from pytorch_lightning.cli import LightningCLI
 from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
@@ -22,21 +21,20 @@ from utils import (
     WhisperTextCollatorWhithPadding_librispeech_with_bert,
     whisper_optimizer,
     whisper_flamingo_optimizer,
-    setup_logging_and_checkpoint_librispeech_text,
+    setup_logging_and_checkpoint_librispeech,
     wer_cer,
     DistributedSamplerWrapper,
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertTokenizer, BertModel
 
 # my command
-# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_tiny_bert.yaml
-# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-deu_tiny_bert.yaml
-# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn+en-deu_tiny_bert.yaml
+# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_small_bert.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -151,20 +149,20 @@ class LibriSpeechTextDataset(Dataset):
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         
         # 處理兩個翻譯文本
-        translated_text_1 = self.get_translation_text(file_id, self.translation_base_dirs[0])
-        translated_text_1 = self.text_normalizer(translated_text_1)
+        translation_1 = self.get_translation_text(file_id, self.translation_base_dirs[0])
+        translation_1 = self.text_normalizer(translation_1)
         
-        translated_text_2 = None
+        translation_2 = None
         if len(self.translation_base_dirs) > 1:
-            translated_text_2 = self.get_translation_text(file_id, self.translation_base_dirs[1])
-            translated_text_2 = self.text_normalizer(translated_text_2)       
+            translation_2 = self.get_translation_text(file_id, self.translation_base_dirs[1])
+            translation_2 = self.text_normalizer(translation_2)       
         
         return {
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translated_text_1": translated_text_1,
-            "translated_text_2": translated_text_2,
+            "translation_1": translation_1,
+            "translation_2": translation_2,
             "wav_lens": wav_lens,
             "audio": audio
         }
@@ -180,7 +178,11 @@ class WhisperTextModule(LightningModule):
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                         dropout_rate=cfg.dropout_rate,
                                         add_gated_x_attn=cfg.add_gated_x_attn,
-                                        bert_encoder=cfg.bert_encoder)
+                                        bert_encoder=cfg.bert_encoder,
+                                        add_resnet= cfg.add_resnet,
+                                        num_resnet_layer=cfg.num_resnet_layer,
+                                        mode = cfg.mode,
+                                        )
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
@@ -224,17 +226,17 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translated_text_1 = batch["translated_text_1"]  # 保持為文本列表
+        translation_1 = batch["translation_1"]  # 保持為文本列表
         
-        # 檢查 batch 中是否有 translated_text_2，沒有則設為 None
+        # 檢查 batch 中是否有 translation_2，沒有則設為 None
         bert_hidden_states_2 = None
-        translated_text_2 = batch.get("translated_text_2", None)
-        if translated_text_2 is not None:
-            translated_text_2 = translated_text_2
+        translation_2 = batch.get("translation_2", None)
+        if translation_2 is not None:
+            translation_2 = translation_2
         
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs_1 = self.bert_tokenizer(
-            translated_text_1,
+            translation_1,
             return_tensors='pt',
             padding=True,
             truncation=True,
@@ -245,10 +247,10 @@ class WhisperTextModule(LightningModule):
         bert_outputs_1 = self.bert_model(**bert_inputs_1)
         bert_hidden_states_1 = bert_outputs_1.last_hidden_state  # [batch_size, seq_len, hidden_size]
 
-        if translated_text_2 is not None:
+        if translation_2 is not None:
             # 使用 BERT 分詞器對文本進行編碼
             bert_inputs_2 = self.bert_tokenizer(
-                translated_text_2,
+                translation_2,
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
@@ -281,21 +283,20 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translated_text_1 = batch["translated_text_1"]  # 保持為文本列表
+        translation_1 = batch["translation_1"]  # 保持為文本列表
         
-        # 檢查 batch 中是否有 translated_text_2，沒有則設為 None
-        translated_text_2 = batch.get("translated_text_2", None)
+        # 檢查 batch 中是否有 translation_2，沒有則設為 None
         bert_hidden_states_2 = None
-        if translated_text_2 is not None:
-            translated_text_2 = translated_text_2
-        print("translated_text_1 :", translated_text_1)
-        print("translated_text_2 :", translated_text_2)
+        translation_2 = batch.get("translation_2", None)
+        if translation_2 is not None:
+            translation_2 = translation_2
+
         audio = batch["audio"]
         wav_lens = batch["wav_lens"] 
         
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs_1 = self.bert_tokenizer(
-            translated_text_1,
+            translation_1,
             return_tensors='pt',
             padding=True,
             truncation=True,
@@ -306,10 +307,10 @@ class WhisperTextModule(LightningModule):
         bert_outputs_1 = self.bert_model(**bert_inputs_1)
         bert_hidden_states_1 = bert_outputs_1.last_hidden_state  # [batch_size, seq_len, hidden_size]
 
-        if translated_text_2 is not None:
+        if translation_2 is not None:
             # 使用 BERT 分詞器對文本進行編碼
             bert_inputs_2 = self.bert_tokenizer(
-                translated_text_2,
+                translation_2,
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
@@ -549,16 +550,15 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            # name="whisper-flamingo + BERT en-cmn + en-deu (batch_size = 16, lr = 3.75e-5, num_train_steps = 160k)",
-            # name="whisper-flamingo + BERT en-cmn (batch_size = 16, lr = 3.75e-5, num_train_steps = 160k)",
-            name="whisper-flamingo + BERT en-deu (batch_size = 16, lr = 3.75e-5, num_train_steps = 160k)",
+            name="whisbert-flamingo en-cmn small",
     )
     
-    tflogger, callback_list = setup_logging_and_checkpoint_librispeech_text(cfg.log_output_dir, 
+    tflogger, callback_list = setup_logging_and_checkpoint_librispeech(cfg.log_output_dir, 
                                                                             cfg.check_output_dir, 
                                                                             cfg.train_name, 
                                                                             cfg.train_id,
-                                                                            cfg.monitor,)
+                                                                            cfg.monitor,
+                                                                            cfg.filename)
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.main_lang, 
                             'train.clean.100+train.clean.360+train.other.500',

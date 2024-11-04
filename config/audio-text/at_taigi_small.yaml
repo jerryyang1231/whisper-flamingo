@@ -27,7 +27,7 @@ lang: zh
 resume_training: False
 
 pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
-train_id: whisper-flamingo_taigi_small
+train_id: whisbert-flamingo_taigi_small_reproduce
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
@@ -40,5 +40,4 @@ mode: "translation"
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
-filename: "step-{step:05d}-cer={val/cer_at:.4f}-wer={val/wer_at:.4f}"
-
+filename: "step-{step:05d}-cer_at={val/cer_at:.4f}-wer_at={val/wer_at:.4f}"

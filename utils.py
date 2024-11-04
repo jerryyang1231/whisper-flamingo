@@ -633,16 +633,14 @@ class WhisperTextCollatorWhithPadding_librispeech_without_bert:
 
 class WhisperTextCollatorWhithPadding_librispeech_with_bert:
     def __call__(self, features):
-        # input_ids, labels, dec_input_ids, translated_texts_1, translated_texts_2, wav_lens, audio = [], [], [], [], [], [], []
-        input_ids, labels, dec_input_ids, en_keywords_text, translated_texts_2, wav_lens, audio = [], [], [], [], [], [], []
+        input_ids, labels, dec_input_ids, translation_1, translation_2, wav_lens, audio = [], [], [], [], [], [], []
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
-            # translated_texts_1.append(f["translated_text_1"])
-            en_keywords_text.append(f["en_keywords_text"])
-            if f.get("translated_text_2") is not None:  # 檢查 translated_text_2 是否為 None
-                translated_texts_2.append(f["translated_text_2"])
+            translation_1.append(f["translation_1"])
+            if f.get("translation_2") is not None:  # 檢查 translation_2 是否為 None
+                translation_2.append(f["translation_2"])
             wav_lens.append(f["wav_lens"])
             audio.append(f["audio"])
 
@@ -664,19 +662,18 @@ class WhisperTextCollatorWhithPadding_librispeech_with_bert:
         labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
         dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
         
-        # 建立 batch，根據是否有 translated_text_2 決定是否包含它
+        # 建立 batch，根據是否有 translation_2 決定是否包含它
         batch = {
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            # "translated_text_1": translated_texts_1,
-            "en_keywords_text": en_keywords_text,
+            "translation_1": translation_1,
             "wav_lens": wav_lens,  # Add wav_lens to the batch
             "audio": audio  # Add the padded audio to the batch
         }
         
-        if translated_texts_2:  # 如果 translated_text_2 存在，將其添加到 batch
-            batch["translated_text_2"] = translated_texts_2
+        if translation_2:  # 如果 translation_2 存在，將其添加到 batch
+            batch["translation_2"] = translation_2
 
         
         # 只將數值類型的項目轉換為張量
@@ -934,7 +931,7 @@ def setup_logging_and_checkpoint_taigi(log_output_dir, check_output_dir, train_n
                      LearningRateMonitor(logging_interval="step")]
     return tflogger, checkpoint_callback, callback_list
 
-def setup_logging_and_checkpoint_librispeech(log_output_dir, check_output_dir, train_name, train_id, monitor):
+def setup_logging_and_checkpoint_librispeech(log_output_dir, check_output_dir, train_name, train_id, monitor, filename):
     Path(log_output_dir).mkdir(exist_ok=True)
     Path(check_output_dir).mkdir(exist_ok=True)
 
@@ -946,30 +943,7 @@ def setup_logging_and_checkpoint_librispeech(log_output_dir, check_output_dir, t
 
     val_checkpoint = ModelCheckpoint(
         dirpath=f"{check_output_dir}/{train_id}",
-        filename="step-{step:05d}-cer={dev-other/cer:.4f}-wer={dev-other/wer:.4f}",
-        monitor=monitor,
-        mode='min',
-        save_top_k=1,
-        auto_insert_metric_name=False,
-    )
-
-    callback_list = [val_checkpoint,
-                     LearningRateMonitor(logging_interval="step")]
-    return tflogger, callback_list
-
-def setup_logging_and_checkpoint_librispeech_text(log_output_dir, check_output_dir, train_name, train_id, monitor):
-    Path(log_output_dir).mkdir(exist_ok=True)
-    Path(check_output_dir).mkdir(exist_ok=True)
-
-    tflogger = TensorBoardLogger(
-        save_dir=log_output_dir,
-        name=train_name,
-        version=train_id
-    )
-
-    val_checkpoint = ModelCheckpoint(
-        dirpath=f"{check_output_dir}/{train_id}",
-        filename="step-{step:05d}-cer={dev-other/cer_at:.4f}-wer={dev-other/wer_at:.4f}",
+        filename=filename,
         monitor=monitor,
         mode='min',
         save_top_k=1,

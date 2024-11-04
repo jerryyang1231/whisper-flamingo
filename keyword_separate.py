@@ -37,6 +37,9 @@ import json
 
 # my command
 # python -u keyword_separate.py config/audio-text/at_taigi_small_keyword_separate.yaml
+# python -u keyword_separate.py config/audio-text/at_taigi_small_keyword_separate_ResNet-4.yaml
+# python -u keyword_separate.py config/audio-text/at_taigi_small_keyword_separate_ResNet-8.yaml
+# python -u keyword_separate.py config/audio-text/at_taigi_small_keyword_separate_ResNet-16.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -421,7 +424,9 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small mix (separate)",
+            # name="whisbert-flamingo taigi small mix ResNet-4 (separate)",
+            # name="whisbert-flamingo taigi small mix ResNet-8 (separate)",
+            name="whisbert-flamingo taigi small mix ResNet-16 (separate)",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
