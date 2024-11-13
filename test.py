@@ -1,98 +1,73 @@
-import jieba
-from pathlib import Path
-import json
-from datasets import load_dataset
-from tqdm import tqdm
+# # Load model directly
+# from transformers import BertModel, BertTokenizer
 
-# 讀取 JSON 華台辭典
-with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
-    dictionary = json.load(f)
+# # 初始化 BERT 分詞器和模型
+# tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
+# model = BertModel.from_pretrained('bert-base-chinese')
 
-def get_keywords(mandarin_text, dictionary, separate=True):
-    mandarin_text_list = mandarin_text.split()
-    all_keywords = []
+# # 獲取中文 BERT 的詞嵌入矩陣
+# source_embedding = model.embeddings.word_embeddings.weight.detach()  # [vocab_size, bert_hidden_size]
+# value_embedding = model.embeddings.word_embeddings.weight.detach()  # [vocab_size, bert_hidden_size]
 
-    for word in mandarin_text_list:
-        if word in dictionary:
-            all_keywords.extend(dictionary[word])
-    
-    return all_keywords if separate else "".join(all_keywords)
+# print("model.embeddings :", model.embeddings)
+# print("model.embeddings.word_embeddings :", model.embeddings.word_embeddings)
+# print("model.embeddings.word_embeddings.weight :", model.embeddings.word_embeddings.weight)
+# print("source_embedding :", source_embedding)
 
-def update_jieba_dict_with_keywords(
-        keywords: list,
-        high_freq_words: list = [],
-        high_freq_words_weight: int = 10
-) -> None:
-    # 去重並排序 keywords
-    keywords = sorted(set(keywords))
+def training_step(self, batch, batch_id):
+    # ...（其他代碼保持不變）
 
-    # 定義 Jieba 字典路徑
-    jieba_dict_path = Path(jieba.__file__).parent / "dict.txt"
-    jieba_dict_path.unlink(missing_ok=True)
-    Path("/tmp/jieba.cache").unlink(missing_ok=True)
+    mandarin_words_list = batch["mandarin_words"]  # List[List[str]]
 
-    # 將 keywords 寫入 Jieba 字典
-    with jieba_dict_path.open("w") as file:
-        for word in keywords:
-            if word in high_freq_words:
-                file.write(f"{word} {len(word) * high_freq_words_weight}\n")
-            else:
-                file.write(f"{word} {len(word)}\n")
+    # 為每個樣本的中文詞彙列表獲取嵌入
+    source_embeddings_list = []
+    for mandarin_words in mandarin_words_list:
+        if mandarin_words:
+            # 使用 BERT 分詞器對中文詞彙進行編碼
+            bert_inputs = self.bert_tokenizer(
+                mandarin_words,
+                add_special_tokens=False,
+                return_tensors='pt',
+                padding=True,
+                truncation=True
+            ).to(self.device)
+            # 通過 BERT 模型獲取嵌入
+            with torch.no_grad():
+                bert_outputs = self.bert_model(**bert_inputs)
+            # 獲取每個詞的嵌入，取最後一層隱狀態
+            embeddings = bert_outputs.last_hidden_state  # [num_words, seq_len, hidden_size]
+            # 對 seq_len 維度取平均（因為每個詞可能被分成多個子詞）
+            embeddings = embeddings.mean(dim=1)  # [num_words, hidden_size]
+            source_embeddings_list.append(embeddings)
+        else:
+            # 如果沒有中文詞彙，添加一個零向量
+            embeddings = torch.zeros(1, self.bert_model.config.hidden_size).to(self.device)
+            source_embeddings_list.append(embeddings)
 
-    # 重置 Jieba 初始化狀態，讓其重新加載字典
-    jieba.dt.initialized = False
+    # 對每個樣本的 source_embeddings 進行填充，確保形狀一致
+    max_num_words = max([emb.shape[0] for emb in source_embeddings_list])
+    padded_source_embeddings = []
+    for emb in source_embeddings_list:
+        num_words = emb.shape[0]
+        if num_words < max_num_words:
+            pad_size = max_num_words - num_words
+            pad_emb = torch.zeros(pad_size, emb.shape[1]).to(self.device)
+            emb = torch.cat([emb, pad_emb], dim=0)
+        padded_source_embeddings.append(emb)
+    # 將列表轉換為張量，形狀為 [batch_size, S, hidden_size]
+    source_embedding = torch.stack(padded_source_embeddings, dim=0)  # [batch_size, S, hidden_size]
+    value_embedding = source_embedding  # 在這種情況下，value_embedding 與 source_embedding 相同
 
-def custom_cut(line: str) -> list:
-    # 使用 Jieba 斷詞
-    return list(jieba.cut(line, cut_all=False, HMM=False))
+    # ...（後續代碼保持不變）
 
-# 載入 yttd_taigi_trs 資料集
-valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw', 
-                'E0-HOPE7_QU', 'EhqcvfaaYu8', 'gDDbnFcvWcQ', 'iy1fPQQSA6c',
-                'kGbjIuzvPR8', 'MrwSzSVGiRE', 'yht8d59dCpo']
-dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
+    # 在前向傳播中，傳遞 xt_1_token_ids、source_embedding、value_embedding
+    out = self.model.decoder(
+        dec_input_ids,
+        audio_features,
+        xt_1_token_ids=xt_1_token_ids,
+        xt_2=translation_embeddings,
+        source_embedding=source_embedding,
+        value_embedding=value_embedding
+    )
 
-# 用於記錄所有台文詞彙及缺少的詞彙
-all_taiwanese_words = set()
-missing_words = set()
-
-# 使用 tqdm 來顯示進度條
-with open("sample_texts.txt", "w", encoding="utf-8") as f:
-    # for i, sample in enumerate(dataset):
-        # if i >= 10:  # 只讀取前10個樣本
-        #     break
-    for sample in tqdm(dataset, desc="Processing samples"):
-        
-        # 從 mandarin_text 獲取 keywords
-        keywords = get_keywords(sample['text_mandarin'], dictionary, separate=True)
-        
-        # 將 keywords 更新到 Jieba 字典
-        update_jieba_dict_with_keywords(keywords)
-
-        # 使用更新後的 Jieba 字典對 text 進行斷詞
-        segmented_text = custom_cut(sample['text'].replace(' ', ''))
-        
-        # 累積本樣本的所有台文詞彙
-        all_taiwanese_words.update(segmented_text)
-                
-        # 找出辭典中沒有的詞彙
-        sample_missing_words = {text for text in segmented_text if text not in keywords}
-        missing_words.update(sample_missing_words)
-        
-        # 將結果寫入文件
-        f.write(f"ID: {sample['id']}\n")
-        f.write(f"Text: {sample['text']}\n")
-        f.write(f"Mandarin Text: {sample['text_mandarin']}\n")
-        f.write(f"Keywords: {keywords}\n")
-        f.write(f"Segmented Text: {' '.join(segmented_text)}\n")
-        f.write(f"Sample Taiwanese Words: {set(segmented_text)}\n")
-        # 如果 sample_missing_words 為空，寫出空白，不顯示 set()
-        f.write(f"Sample Missing Words: {sample_missing_words if sample_missing_words else ''}\n")
-        f.write("=" * 100 + "\n")
-
-# 結果輸出
-print("所有台文詞彙:", all_taiwanese_words)
-print("辭典中缺少的台文詞彙:", missing_words)
-print("所有台文詞彙數量:", len(all_taiwanese_words))
-print("缺少台文詞彙的數量:", len(missing_words))
+    # ...（後續代碼保持不變）

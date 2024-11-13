@@ -34,7 +34,8 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertTokenizer, BertModel
 
 # my command
-# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_small_bert.yaml
+# CUDA_VISIBLE_DEVICES=0 python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_small_bert.yaml
+# CUDA_VISIBLE_DEVICES=1 python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-deu_small_bert.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -551,6 +552,7 @@ if __name__ == "__main__":
     wandb.init(project="whisper-flamingo",
             config=cfg,
             name="whisbert-flamingo en-cmn small",
+            # name="whisbert-flamingo en-deu small",
     )
     
     tflogger, callback_list = setup_logging_and_checkpoint_librispeech(cfg.log_output_dir, 

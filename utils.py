@@ -445,12 +445,12 @@ class WhisperTextCollatorWhithPadding_taigi_without_bert:
 
 class WhisperTextCollatorWhithPadding_taigi_with_bert:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, translated_texts, wav_lens = [], [], [], [], []
+        input_ids, labels, dec_input_ids, translations, wav_lens = [], [], [], [], []
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
-            translated_texts.append(f["translated_text"])
+            translations.append(f["translations"])
             wav_lens.append(f["wav_lens"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
@@ -469,7 +469,7 @@ class WhisperTextCollatorWhithPadding_taigi_with_bert:
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translated_text": translated_texts,
+            "translations": translations,
             "wav_lens": wav_lens  # Add wav_lens to the batch
         }
         
@@ -528,7 +528,12 @@ class WhisperTextCollatorWhithPadding_taigi_mix:
     
 class WhisperTextCollatorWhithPadding_taigi_cls:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, translations, keywords, wav_lens = [], [], [], [], [], []
+        input_ids, labels, dec_input_ids, translations, keywords, wav_lens= [], [], [], [], [], []
+        mandarin_words = []  # 初始化 mandarin_words 為空列表
+        
+        # 檢查 features 中是否包含 "mandarin_words" 欄位
+        has_mandarin_words = "mandarin_words" in features[0]
+        
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
@@ -536,7 +541,11 @@ class WhisperTextCollatorWhithPadding_taigi_cls:
             translations.append(f["translations"])
             keywords.append(f["keywords"])
             wav_lens.append(f["wav_lens"])
-
+            
+            # 如果有 "mandarin_words"，則加入列表
+            if has_mandarin_words:
+                mandarin_words.append(f["mandarin_words"])        
+        
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
         input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
@@ -557,8 +566,12 @@ class WhisperTextCollatorWhithPadding_taigi_cls:
             "dec_input_ids": dec_input_ids,
             "keywords": keywords,
             "translations": translations,
-            "wav_lens": wav_lens  # Add wav_lens to the batch
+            "wav_lens": wav_lens,  # Add wav_lens to the batch
         }
+        
+        # 只有在 features 包含 "mandarin_words" 時才加入 batch
+        if has_mandarin_words:
+            batch["mandarin_words"] = mandarin_words
         
         # 只將數值類型的項目轉換為張量
         for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
@@ -830,8 +843,8 @@ def whisper_flamingo_projection_optimizer(model, cfg, t_total):
     return optimizer, scheduler
 
 def whisper_flamingo_optimizer(model, cfg, t_total):
-    x_attn = ["gated_x_attn", "attn_gate", "ff", "resnet"]
-       
+    x_attn = ["gated_x_attn", "attn_gate", "ff", "resnet", "reprogramming_layer"]
+
     optimizer_grouped_parameters = [
         {
             "params": [p for n, p in model.named_parameters()
@@ -923,7 +936,7 @@ def setup_logging_and_checkpoint_taigi(log_output_dir, check_output_dir, train_n
         filename=filename,
         monitor=monitor,
         mode='min',
-        save_top_k=1,
+        save_top_k=3,
         auto_insert_metric_name=False,
     )
 

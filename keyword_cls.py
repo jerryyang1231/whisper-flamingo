@@ -28,7 +28,7 @@ from utils import (
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
@@ -90,10 +90,8 @@ class YTTDTaigiTRSDataset(Dataset):
         mandarin_text = item['text_mandarin']
         wav_lens = len(wav_data)
         
-        # 使用 BasicTextNormalizer 正規化文本
-        text = self.text_normalizer(text)
-        # 移除空格
         text = text.replace(" ", "")
+        text = self.text_normalizer(text)
 
         all_keywords = get_all_keywords(mandarin_text, self.dictionary, separate=True)
         
@@ -125,7 +123,6 @@ class YTTDTaigiTRSDataset(Dataset):
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
 
         mandarin_text = mandarin_text.replace(" ", "")
-        # 使用 BasicTextNormalizer 正規化文本
         mandarin_text = self.text_normalizer(mandarin_text)
 
         return {
@@ -529,7 +526,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

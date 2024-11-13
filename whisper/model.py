@@ -13,6 +13,8 @@ from .decoding import decode as decode_function
 from .decoding import detect_language as detect_language_function
 from .transcribe import transcribe as transcribe_function
 
+from transformers import BertModel, BertTokenizer
+import math  # 添加必要的導入
 
 @dataclass
 class ModelDimensions:
@@ -205,6 +207,84 @@ class ResNet1D(nn.Module):
         x = x.permute(0, 2, 1)  # 轉回 (batch_size, seq_length, input_dim)
         return x
 
+class ReprogrammingLayer_m1(nn.Module):
+    def __init__(self, d_model, n_heads, d_keys=None, d_llm=None, attention_dropout=0.1):
+        super(ReprogrammingLayer_m1, self).__init__()
+
+        d_keys = d_keys or (d_model // n_heads)
+        d_llm = d_llm or d_model  # 默認與 d_model 相同
+
+        self.query_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.key_projection = nn.Linear(d_llm, d_keys * n_heads)
+        self.value_projection = nn.Linear(d_llm, d_keys * n_heads)
+        self.out_projection = nn.Linear(d_keys * n_heads, d_llm)
+        self.n_heads = n_heads
+        self.dropout = nn.Dropout(attention_dropout)
+
+    def forward(self, target_embedding, source_embedding, value_embedding):
+        B, L, _ = target_embedding.shape
+        S, _ = source_embedding.shape
+        H = self.n_heads
+
+        # 投影查詢、鍵和值
+        target_embedding = self.query_projection(target_embedding).view(B, L, H, -1)
+        source_embedding = self.key_projection(source_embedding).view(S, H, -1)
+        value_embedding = self.value_projection(value_embedding).view(S, H, -1)
+
+        # 計算注意力分數
+        scale = 1.0 / math.sqrt(target_embedding.size(-1))
+        scores = torch.einsum("blhd,shd->bhls", target_embedding, source_embedding) * scale
+
+        # 計算注意力權重
+        A = self.dropout(torch.softmax(scores, dim=-1))
+
+        # 計算重新編程後的嵌入
+        reprogrammed_embedding = torch.einsum("bhls,shd->blhd", A, value_embedding)
+        reprogrammed_embedding = reprogrammed_embedding.reshape(B, L, -1)
+        
+        # 輸出
+        out = self.out_projection(reprogrammed_embedding)
+        return out
+    
+class ReprogrammingLayer_m2(nn.Module):
+    def __init__(self, d_model, n_heads, d_keys=None, d_llm=None, attention_dropout=0.1):
+        super(ReprogrammingLayer_m2, self).__init__()
+
+        d_keys = d_keys or (d_model // n_heads)
+        d_llm = d_llm or d_model  # 默認與 d_model 相同
+
+        self.query_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.key_projection = nn.Linear(d_llm, d_keys * n_heads)
+        self.value_projection = nn.Linear(d_llm, d_keys * n_heads)
+        self.out_projection = nn.Linear(d_keys * n_heads, d_llm)
+        self.n_heads = n_heads
+        self.dropout = nn.Dropout(attention_dropout)
+
+    def forward(self, target_embedding, source_embedding, value_embedding):
+        B, L, _ = target_embedding.shape
+        B_s, S, _ = source_embedding.shape  # B_s 應該等於 B
+        H = self.n_heads
+
+        # 投影查詢、鍵和值
+        target_embedding = self.query_projection(target_embedding).view(B, L, H, -1)
+        source_embedding = self.key_projection(source_embedding).view(B, S, H, -1)
+        value_embedding = self.value_projection(value_embedding).view(B, S, H, -1)
+
+        # 計算注意力分數
+        scale = 1.0 / math.sqrt(target_embedding.size(-1))
+        scores = torch.einsum("blhd, bshd -> bhls", target_embedding, source_embedding) * scale
+
+        # 計算注意力權重
+        A = self.dropout(torch.softmax(scores, dim=-1))
+
+        # 計算重新編程後的嵌入
+        reprogrammed_embedding = torch.einsum("bhls, bshd -> blhd", A, value_embedding)
+        reprogrammed_embedding = reprogrammed_embedding.reshape(B, L, -1)
+        
+        # 輸出
+        out = self.out_projection(reprogrammed_embedding)
+        return out
+
 class AudioEncoder(nn.Module):
     def __init__(
         self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, 
@@ -278,6 +358,10 @@ class TextDecoder(nn.Module):
         self.dropout = torch.nn.Dropout(dropout_rate)     
 
         self.bert_encoder = bert_encoder
+        if bert_encoder:
+            # 初始化 BERT 模型
+            self.bert_model = BertModel.from_pretrained('bert-base-chinese')
+        
         if bert_hidden_size != n_state:
             self.xt_projection = nn.Linear(bert_hidden_size, n_state)
         else:
@@ -287,9 +371,25 @@ class TextDecoder(nn.Module):
         if add_resnet:
             self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
         self.mode = mode
+        
+        if mode == "reprogram_m1":
+            # 初始化 ReprogrammingLayer
+            self.reprogramming_layer = ReprogrammingLayer_m1(
+                d_model=n_state,  # 目標嵌入維度
+                n_heads=n_head,   # 注意力頭數量
+                d_llm=bert_hidden_size  # BERT 的嵌入維度
+            )
+        elif mode == "reprogram_m2":
+            # 初始化 ReprogrammingLayer
+            self.reprogramming_layer = ReprogrammingLayer_m2(
+                d_model=n_state,  # 目標嵌入維度
+                n_heads=n_head,   # 注意力頭數量
+                d_llm=bert_hidden_size  # BERT 的嵌入維度
+            )
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
-                xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None):
+                xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None,
+                source_embedding: Optional[Tensor] = None, value_embedding: Optional[Tensor] = None):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens
@@ -334,9 +434,6 @@ class TextDecoder(nn.Module):
                     xt_1 = self.xt_projection(xt_1)
                 # No positional embedding for xt_1 in "cls" mode
                 xt_1 = xt_1.to(xa.dtype)
-
-            # xt_2 remains None
-            xt_2 = None
         elif self.mode == "cls":
             # xt_1 with BERT and without positional embedding
             if xt_1 is not None:
@@ -351,6 +448,31 @@ class TextDecoder(nn.Module):
                     xt_2 = self.xt_projection(xt_2)
                 xt_2 = xt_2 + self.positional_embedding[offset: offset + xt_2.shape[1]]
                 xt_2 = xt_2.to(xa.dtype)
+        elif self.mode in ["reprogram_m1", "reprogram_m2"]:
+            if xt_1 is not None:
+                # 獲取 target_embedding
+                target_embedding = self.token_embedding(xt_1)  # [batch_size, seq_len, n_state]
+                
+                # 使用 ReprogrammingLayer
+                reprogrammed_embedding = self.reprogramming_layer(
+                    target_embedding, source_embedding, value_embedding
+                )  # [batch_size, seq_len, bert_hidden_size]
+                
+                # 通過 BERT 模型獲取輸出
+                bert_outputs = self.bert_model(inputs_embeds=reprogrammed_embedding)
+                xt_1 = bert_outputs.last_hidden_state  # [batch_size, seq_len, bert_hidden_size]
+                
+                # 投影到 n_state 維度
+                if xt_1.shape[-1] != x.shape[-1]:
+                    xt_1 = self.xt_projection(xt_1)
+                xt_1 = xt_1.to(xa.dtype)
+            
+             # xt_2 with BERT and positional embedding
+            if xt_2 is not None:
+                if xt_2.shape[-1] != x.shape[-1]:
+                    xt_2 = self.xt_projection(xt_2)
+                xt_2 = xt_2 + self.positional_embedding[offset: offset + xt_2.shape[1]]
+                xt_2 = xt_2.to(xa.dtype)            
         
         # Pass through the layers
         for layer, block in enumerate(self.blocks):

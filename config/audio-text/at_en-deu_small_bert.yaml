@@ -1,5 +1,5 @@
 train_name: whisper
-audio_max_length: 640000  # 40 sec
+audio_max_length: 640000 # 40 sec
 text_max_length: null
 accelerator: auto
 weight_decay: 0.01
@@ -9,11 +9,11 @@ validate_every_n_batches: 1000
 num_devices: 1
 precision: 16-mixed
 
-model_name: tiny
-learning_rate: 1.0e-4 
-batch_size: 32
-num_train_steps: 100000
-warmup_steps: 10000
+model_name: small
+learning_rate: 1.25e-5 # small
+batch_size: 4
+num_train_steps: 480000
+warmup_steps: 48000
 gradient_accumulation_steps: 1
 
 monitor: 'dev-other/wer_at'  
@@ -23,20 +23,24 @@ noise_snr_train: 0
 spec_augment: ""
 dropout_rate: 0 
 
-lang: en
+main_lang: en
 resume_training: False
 
-pt_ckpt: 'whisper_en_tiny_final/step-40000-cer=0.0519-wer=0.0938.ckpt'
-# pt_ckpt: ''
-train_id: whisper-flamingo_en-fr_tiny
+pt_ckpt: 'whisper_en-x_small/step-27000-cer=0.0297-wer=0.0575.ckpt'
+train_id: whisbert-flamingo_en-deu_small
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
+bert_encoder: True
+add_resnet: False
+num_resnet_layer: 0
+mode: "translation"
 
-translation_base_dir: "/share/nas169/jerryyang/corpus/m2m100/librispeech/french"
+translation_base_dirs:
+  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/German"
+
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
-
-
+filename: "step-{step:05d}-cer_at={dev-other/cer_at:.4f}-wer_at={dev-other/wer_at:.4f}"

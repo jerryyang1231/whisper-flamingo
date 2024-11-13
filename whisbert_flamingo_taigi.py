@@ -27,13 +27,14 @@ from utils import (
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 
 # my command
-# CUDA_VISIBLE_DEVICES=0 python -u whisbert_flamingo_taigi.py config/audio-text/at_taigi_small.yaml
+# python -u whisbert_flamingo_taigi.py config/audio-text/at_taigi_small.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -84,11 +85,9 @@ class YTTDTaigiTRSDataset(Dataset):
         text = item['text']
         mandarin_text = item['text_mandarin']
         wav_lens = len(wav_data)
-        
-        # 使用 BasicTextNormalizer 正規化文本
-        text = self.text_normalizer(text)
-        # 移除空格
+
         text = text.replace(" ", "")
+        text = self.text_normalizer(text)
         
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
@@ -118,13 +117,13 @@ class YTTDTaigiTRSDataset(Dataset):
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
 
         mandarin_text = mandarin_text.replace(" ", "")
-        # 使用 BasicTextNormalizer 正規化文本
         mandarin_text = self.text_normalizer(mandarin_text)
+
         return {
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translated_text": mandarin_text,
+            "translations": mandarin_text,
             "wav_lens": wav_lens
         }
 
@@ -182,11 +181,11 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translated_text = batch["translated_text"]  # 保持為文本列表
+        translations = batch["translations"]  # 保持為文本列表
 
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs = self.bert_tokenizer(
-            translated_text,
+            translations,
             return_tensors='pt',
             padding=True,
             truncation=True,
@@ -195,7 +194,7 @@ class WhisperTextModule(LightningModule):
         
         # 通過 BERT 模型獲取輸出
         bert_outputs = self.bert_model(**bert_inputs)
-        bert_hidden_states = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        translation_embeddings = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
         
         if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
             for p in self.model.encoder.parameters():
@@ -208,7 +207,7 @@ class WhisperTextModule(LightningModule):
         features = self.model.encoder(input_ids, training=True)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
-        out = self.model.decoder(dec_input_ids, features, xt_1=bert_hidden_states)
+        out = self.model.decoder(dec_input_ids, features, xt_1=translation_embeddings)
         
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
@@ -220,11 +219,11 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translated_text = batch["translated_text"]  # 保持為文本列表
-        
+        translations = batch["translations"]  # 保持為文本列表
+
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs = self.bert_tokenizer(
-            translated_text,
+            translations,
             return_tensors='pt',
             padding=True,
             truncation=True,
@@ -233,12 +232,12 @@ class WhisperTextModule(LightningModule):
         
         # 通過 BERT 模型獲取輸出
         bert_outputs = self.bert_model(**bert_inputs)
-        bert_hidden_states = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        translation_embeddings = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
         
         features_a = self.model.encoder(input_ids)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
-        out_at = self.model.decoder(dec_input_ids, features_a, xt_1=bert_hidden_states)
+        out_at = self.model.decoder(dec_input_ids, features_a, xt_1=translation_embeddings)
 
         labels[labels == -100] = self.tokenizer.eot
 
@@ -385,7 +384,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small reproduce",
+            name="whisbert-flamingo taigi small reproduce_3",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -428,7 +427,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()
