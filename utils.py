@@ -528,7 +528,7 @@ class WhisperTextCollatorWhithPadding_taigi_mix:
     
 class WhisperTextCollatorWhithPadding_taigi_cls:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, translations, keywords, wav_lens= [], [], [], [], [], []
+        input_ids, labels, dec_input_ids, translations, grouped_keywords, wav_lens= [], [], [], [], [], []
         mandarin_words = []  # 初始化 mandarin_words 為空列表
         
         # 檢查 features 中是否包含 "mandarin_words" 欄位
@@ -539,7 +539,7 @@ class WhisperTextCollatorWhithPadding_taigi_cls:
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
             translations.append(f["translations"])
-            keywords.append(f["keywords"])
+            grouped_keywords.append(f["grouped_keywords"])
             wav_lens.append(f["wav_lens"])
             
             # 如果有 "mandarin_words"，則加入列表
@@ -564,7 +564,7 @@ class WhisperTextCollatorWhithPadding_taigi_cls:
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "keywords": keywords,
+            "grouped_keywords": grouped_keywords,
             "translations": translations,
             "wav_lens": wav_lens,  # Add wav_lens to the batch
         }
@@ -843,7 +843,8 @@ def whisper_flamingo_projection_optimizer(model, cfg, t_total):
     return optimizer, scheduler
 
 def whisper_flamingo_optimizer(model, cfg, t_total):
-    x_attn = ["gated_x_attn", "attn_gate", "ff", "resnet", "reprogramming_layer"]
+    # x_attn = ["gated_x_attn", "attn_gate", "ff", "resnet", "reprogramming_layer"]
+    x_attn = ["gated_x_attn", "attn_gate", "ff", "keyword_cross_attn"]
 
     optimizer_grouped_parameters = [
         {
@@ -1168,12 +1169,8 @@ def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, a
     return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
 
 def get_all_keywords(mandarin_text, dictionary, separate=False):
-    mandarin_text = mandarin_text
-    # print("mandarin_text :", mandarin_text)
-
     # 句子斷詞
     mandarin_text_list = mandarin_text.split()
-    # print("mandarin_text_list :", mandarin_text_list)
 
     # 初始化一個空的列表來存放所有查詢結果
     all_keywords = []
@@ -1185,13 +1182,36 @@ def get_all_keywords(mandarin_text, dictionary, separate=False):
             all_keywords.extend(dictionary[word])  # 再加入所有翻譯
 
     if separate == True:
-        # print("all_keywords list:", all_keywords)
         return all_keywords
     
-    # print("all_keywords list:", all_keywords)
     all_keywords = "".join(all_keywords)
     
-    # 輸出結果，列出所有原詞與其翻譯
-    # print("all_keywords string:", all_keywords)
-    
     return all_keywords
+
+def get_grouped_keywords(mandarin_text, dictionary, separate=False):
+    # 句子斷詞
+    mandarin_text_list = mandarin_text.split()
+    # print("mandarin_text_list :", mandarin_text_list)
+
+    # 初始化一個空的列表來存放所有查詢結果
+    grouped_keywords = []    
+    for word in mandarin_text_list:
+        # print("word :", word)
+        # 查詢華台辭典，獲取該中文詞對應的台文詞彙列表
+        keywords = dictionary.get(word, [])
+        # print("keywords :", keywords)
+        if keywords:
+            # 將台文詞彙列表作為一個子列表存入 grouped_keywords
+            grouped_keywords.append(keywords)
+        else:
+            # 如果沒有對應的台文詞彙，則添加一個空列表
+            grouped_keywords.append([])
+        # print("grouped_keywords :", grouped_keywords)
+
+    # 如果選擇分開顯示
+    if separate:
+        return grouped_keywords
+    
+    # 將所有子列表展開並合併為一個單一的列表
+    flattened_keywords = [keyword for sublist in grouped_keywords for keyword in sublist]
+    return flattened_keywords

@@ -304,13 +304,21 @@ class AudioEncoder(nn.Module):
         self.ln_post = LayerNorm(n_state)
         self.dropout_rate = dropout_rate
         self.dropout = torch.nn.Dropout(dropout_rate)      
+        
+        self.cross_attention_layers = [0, 1, 2, 3]  # 指定在哪些層加入交叉注意力
+        self.keyword_cross_attn = nn.ModuleList([
+            MultiHeadAttention(n_state, n_head) for _ in self.cross_attention_layers
+        ])
+        self.keyword_cross_attn_ln = nn.ModuleList([
+            LayerNorm(n_state) for _ in self.cross_attention_layers
+        ])
 
     def forward(self, x: Tensor, x_v=None, training=False, test_a=False, test_v=False, track_norm=False, 
-                padding_mask=None):
+                padding_mask=None, keyword_representations: Optional[Tensor] = None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
-        """
+        """        
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
@@ -324,8 +332,27 @@ class AudioEncoder(nn.Module):
         # NOTE: if max_len is 30s, then the cropping doesn't do anything.
         x = (x + self.positional_embedding[: x.shape[1]]).to(x.dtype) # trim pos embedding
         
-        for layer, block in enumerate(self.blocks):
+        # for layer, block in enumerate(self.blocks):
+        #     x = block(x)
+        
+        for idx, block in enumerate(self.blocks):
+            # 印出目前的層索引
+            # print(f"Passing through Encoder Block {idx}")
+            
             x = block(x)
+            if idx in self.cross_attention_layers and keyword_representations is not None:
+                # 獲取對應的交叉注意力層
+                layer_idx = self.cross_attention_layers.index(idx)
+                cross_attn = self.keyword_cross_attn[layer_idx]
+                cross_attn_ln = self.keyword_cross_attn_ln[layer_idx]
+                # 印出交叉注意力層的資訊
+                # print(f"Applying cross attention at Encoder Block {idx} (cross attention layer index {layer_idx})")
+                # 準備關鍵詞表示
+                kw = keyword_representations
+                # 計算交叉注意力
+                x = x + cross_attn(cross_attn_ln(x), kw)[0]
+            # else:
+                # print(f"No cross attention applied at Encoder Block {idx}")
 
         x = self.ln_post(x)
 
@@ -379,7 +406,8 @@ class TextDecoder(nn.Module):
                 n_heads=n_head,   # 注意力頭數量
                 d_llm=bert_hidden_size  # BERT 的嵌入維度
             )
-        elif mode == "reprogram_m2":
+        # elif mode == "reprogram_m2":
+        elif mode in ["reprogram_m2", "keyword"]:
             # 初始化 ReprogrammingLayer
             self.reprogramming_layer = ReprogrammingLayer_m2(
                 d_model=n_state,  # 目標嵌入維度
@@ -426,13 +454,32 @@ class TextDecoder(nn.Module):
                 if xt_1.shape[-1] != x.shape[-1]:
                     xt_1 = self.xt_projection(xt_1)
                 xt_1 = xt_1 + self.positional_embedding[offset: offset + xt_1.shape[1]]
-                xt_1 = xt_1.to(xa.dtype)
+                xt_1 = xt_1.to(xa.dtype)   
         elif self.mode == "keyword":
-            # xt_1 with BERT and without positional embedding
+            # # xt_1 with BERT and without positional embedding
+            # if xt_1 is not None:
+            #     if xt_1.shape[-1] != x.shape[-1]:
+            #         xt_1 = self.xt_projection(xt_1)
+            #     # No positional embedding for xt_1 in "cls" mode
+            #     xt_1 = xt_1.to(xa.dtype)
+            
+            # for reprogram
             if xt_1 is not None:
+                # 獲取 target_embedding
+                target_embedding = self.token_embedding(xt_1)  # [batch_size, seq_len, n_state]
+                
+                # 使用 ReprogrammingLayer
+                reprogrammed_embedding = self.reprogramming_layer(
+                    target_embedding, source_embedding, value_embedding
+                )  # [batch_size, seq_len, bert_hidden_size]
+                
+                # 通過 BERT 模型獲取輸出
+                bert_outputs = self.bert_model(inputs_embeds=reprogrammed_embedding)
+                xt_1 = bert_outputs.last_hidden_state  # [batch_size, seq_len, bert_hidden_size]
+                
+                # 投影到 n_state 維度
                 if xt_1.shape[-1] != x.shape[-1]:
                     xt_1 = self.xt_projection(xt_1)
-                # No positional embedding for xt_1 in "cls" mode
                 xt_1 = xt_1.to(xa.dtype)
         elif self.mode == "cls":
             # xt_1 with BERT and without positional embedding
@@ -467,7 +514,7 @@ class TextDecoder(nn.Module):
                     xt_1 = self.xt_projection(xt_1)
                 xt_1 = xt_1.to(xa.dtype)
             
-             # xt_2 with BERT and positional embedding
+            # xt_2 with BERT and positional embedding
             if xt_2 is not None:
                 if xt_2.shape[-1] != x.shape[-1]:
                     xt_2 = self.xt_projection(xt_2)

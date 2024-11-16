@@ -29,8 +29,13 @@ def update_jieba_dict_with_keywords(
     # 定義 Jieba 字典路徑
     jieba_dict_path = Path(jieba.__file__).parent / "dict.txt"
     jieba_dict_path.unlink(missing_ok=True)
-    Path("/tmp/jieba.cache").unlink(missing_ok=True)
-
+    # Path("/tmp/jieba.cache").unlink(missing_ok=True)
+    
+    # 更改 Jieba 緩存文件的路徑
+    user_cache_dir = Path.home() / ".cache" / "jieba"
+    user_cache_dir.mkdir(parents=True, exist_ok=True)  # 確保目錄存在
+    user_cache_path = user_cache_dir / "jieba.cache"
+    
     # 將 keywords 寫入 Jieba 字典
     with jieba_dict_path.open("w") as file:
         for word in keywords:
@@ -50,15 +55,28 @@ def custom_cut(line: str) -> list:
 valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw', 
                 'E0-HOPE7_QU', 'EhqcvfaaYu8', 'gDDbnFcvWcQ', 'iy1fPQQSA6c',
                 'kGbjIuzvPR8', 'MrwSzSVGiRE', 'yht8d59dCpo']
-dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
+# train set
+# dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
+# dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
+# print(f"train set size: {len(dataset)}")
+
+# valid set
+# dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
+# dataset = dataset.filter(lambda sample: sample['id'][:11] in valid_set_list)
+# print(f"valid set size: {len(dataset)}")
+
+# test set
+dataset = load_dataset("formospeech/yttd_taigi_trs", name='test', split='train')
+print(f"test set size: {len(dataset)}")
 
 # 用於記錄所有台文詞彙及缺少的詞彙
 all_taiwanese_words = set()
 missing_words = set()
 
 # 使用 tqdm 來顯示進度條
-with open("sample_texts.txt", "w", encoding="utf-8") as f:
+# with open("train_texts.txt", "w", encoding="utf-8") as f:
+# with open("valid_texts.txt", "w", encoding="utf-8") as f:
+with open("test_texts.txt", "w", encoding="utf-8") as f:
     # for i, sample in enumerate(dataset):
         # if i >= 10:  # 只讀取前10個樣本
         #     break
@@ -92,7 +110,7 @@ with open("sample_texts.txt", "w", encoding="utf-8") as f:
         f.write("=" * 100 + "\n")
 
 # 結果輸出
-print("所有台文詞彙:", all_taiwanese_words)
-print("辭典中缺少的台文詞彙:", missing_words)
+# print("所有台文詞彙:", all_taiwanese_words)
+# print("辭典中缺少的台文詞彙:", missing_words)
 print("所有台文詞彙數量:", len(all_taiwanese_words))
 print("缺少台文詞彙的數量:", len(missing_words))
