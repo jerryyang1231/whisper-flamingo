@@ -78,7 +78,6 @@ class YTTDTaigiTRSDataset(Dataset):
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
-        # self.n_ctx = 448
         self.dictionary = dictionary  # 儲存辭典以便後續使用
 
     def __len__(self):
@@ -99,7 +98,7 @@ class YTTDTaigiTRSDataset(Dataset):
         # 移除空格
         text = text.replace(" ", "")
 
-        all_keywords = get_all_keywords(mandarin_text, self.dictionary, separate=True)
+        all_keywords = get_all_keywords(mandarin_text, self.dictionary)
         
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
@@ -113,13 +112,13 @@ class YTTDTaigiTRSDataset(Dataset):
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
             
-        # if self.spec_augment:
-        #     if self.spec_augment == "ls-double":
-        #         mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
-        #     elif self.spec_augment == "ls-basic":
-        #         mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
-        #     else:
-        #         raise NotImplementedError 
+        if self.spec_augment:
+            if self.spec_augment == "ls-double":
+                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
+            elif self.spec_augment == "ls-basic":
+                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
+            else:
+                raise NotImplementedError 
 
         dec_input_ids = [self.tokenizer.sot, 
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
@@ -146,11 +145,7 @@ class YTTDTaigiTRSDataset(Dataset):
         
         # 輸出結果
         # print("unique_keywords_tokens :", unique_keywords_tokens)
-
-        # 截斷 translated_text 以符合 self.n_ctx 的限制
-        # if len(translated_text) > self.n_ctx:
-        #     translated_text = translated_text[:self.n_ctx]    
-        
+ 
         return {
             "input_ids": mel,
             "labels": labels,

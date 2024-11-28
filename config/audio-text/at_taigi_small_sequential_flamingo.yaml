@@ -27,7 +27,8 @@ lang: zh
 resume_training: False
 
 pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
-train_id: whisbert-flamingo_taigi_small_keyword_selection_x-attn-12
+# train_id: whisbert-flamingo_taigi_small_sequential_flamingo_keyword_first
+train_id: whisbert-flamingo_taigi_small_sequential_flamingo_translation_first
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
@@ -36,7 +37,8 @@ add_gated_x_attn: 1 # 0 for False, 1 for True
 bert_encoder: True
 add_resnet: False
 num_resnet_layer: 0
-mode: "translation"
+mode: "mix"
+sequential_gated_x_attn: True # False for parallel flamingo
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"

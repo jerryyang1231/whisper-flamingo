@@ -117,6 +117,10 @@ def load_model(
     add_resnet: bool = False,
     num_resnet_layer: int = 4,
     mode: str = "translation",
+    sequential_gated_x_attn: bool = False,
+    biasing: bool = True,
+    attndim: int = 256,
+    tokenizer=None,
 ) -> Whisper:
     """
     Load a Whisper ASR model
@@ -166,7 +170,8 @@ def load_model(
     print("Whisper dropout rate : {}".format(dropout_rate))
     model = Whisper(dims, dropout_rate, video, video_model_path, av_hubert_path, prob_av, prob_a, 
                     av_hubert_encoder, av_fusion, add_adapter, adapter_dim, add_gated_x_attn, 
-                    bert_encoder, bert_dim, add_resnet, num_resnet_layer, mode)
+                    bert_encoder, bert_dim, add_resnet, num_resnet_layer, mode, sequential_gated_x_attn,
+                    biasing, attndim, tokenizer)
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
     # if alignment_heads is not None:

@@ -36,7 +36,7 @@ from transformers import BertModel, BertTokenizer
 import json
 
 # my command
-# python -u keyword_selection.py config/audio-text/at_taigi_small_keyword_selection.yaml
+# python -u sequential_flamingo.py config/audio-text/at_taigi_small_sequential_flamingo.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -150,6 +150,7 @@ class WhisperTextModule(LightningModule):
                                         add_resnet= cfg.add_resnet,
                                         num_resnet_layer=cfg.num_resnet_layer,
                                         mode = cfg.mode,
+                                        sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         )
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
@@ -253,11 +254,11 @@ class WhisperTextModule(LightningModule):
         #     with torch.no_grad():
         #         features, x_v = self.model.encoder(input_ids, video, training=True)
         # else:
-        # audio_features = self.model.encoder(input_ids, training=True)
-        audio_features = self.model.encoder(input_ids, training=True, keyword_representations=keyword_representations)
+        audio_features = self.model.encoder(input_ids, training=True)
         
-        # translation only
-        out = self.model.decoder(dec_input_ids, audio_features, xt_1=translation_embeddings)
+        # mix
+        # out = self.model.decoder(dec_input_ids, audio_features, xt_1=keyword_representations, xt_2=translation_embeddings)
+        out = self.model.decoder(dec_input_ids, audio_features, xt_1=translation_embeddings, xt_2=keyword_representations)
         
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
@@ -324,11 +325,11 @@ class WhisperTextModule(LightningModule):
         bert_outputs_2 = self.bert_model(**bert_inputs_2)
         translation_embeddings = bert_outputs_2.last_hidden_state  # [batch_size, seq_len, hidden_size]
         
-        # audio_features = self.model.encoder(input_ids)
-        audio_features = self.model.encoder(input_ids, keyword_representations=keyword_representations)
+        audio_features = self.model.encoder(input_ids)
         
-        # translation only
-        out_at = self.model.decoder(dec_input_ids, audio_features, xt_1=translation_embeddings)
+        # mix
+        # out_at = self.model.decoder(dec_input_ids, audio_features, xt_1=keyword_representations, xt_2=translation_embeddings)
+        out_at = self.model.decoder(dec_input_ids, audio_features, xt_1=translation_embeddings, xt_2=keyword_representations)
 
         labels[labels == -100] = self.tokenizer.eot
 
@@ -463,16 +464,6 @@ class WhisperTextModule(LightningModule):
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding_taigi_cls())
-    
-    def compute_self_attention(self, token_embeddings):
-        # token_embeddings: [token_len, n_state]
-        token_embeddings = token_embeddings.unsqueeze(0)  # [1, token_len, n_state]
-        # 使用單頭自注意力
-        attn = nn.MultiheadAttention(embed_dim=self.model.decoder.token_embedding.embedding_dim, num_heads=1).to(self.device)
-        attn_output, _ = attn(token_embeddings, token_embeddings, token_embeddings)  # [1, token_len, n_state]
-        # 對輸出取平均或其他聚合方式，得到詞彙representaion
-        word_representation = attn_output.mean(dim=1).squeeze(0)  # [n_state]
-        return word_representation
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -489,9 +480,8 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            # name="whisbert-flamingo taigi small keyword seletion x-attn-4"
-            # name="whisbert-flamingo taigi small keyword seletion x-attn-8"
-            name="whisbert-flamingo taigi small keyword seletion x-attn-12"
+            # name="whisbert-flamingo taigi small sequential_flamingo (keyword first)"
+            name="whisbert-flamingo taigi small sequential_flamingo (translation first)"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 

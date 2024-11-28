@@ -579,6 +579,52 @@ class WhisperTextCollatorWhithPadding_taigi_cls:
 
         return batch
 
+class WhisperTextCollatorWhithPadding_taigi_biasing:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, biasing_list, wav_lens, targets =[], [], [], [], [], []
+        
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            biasing_list.append(f["biasing_list"])
+            wav_lens.append(f["wav_lens"])
+            targets.append(f["targets"])         
+        
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant',
+                            constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        target_lengths = [len(t) for t in targets]
+        max_label_len = max(label_lengths + dec_input_ids_length + target_lengths)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                  for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                         for e, e_len in zip(dec_input_ids, dec_input_ids_length)]     
+        targets = [np.pad(t, (0, max_label_len - t_len), 'constant', constant_values=-100) 
+           for t, t_len in zip(targets, target_lengths)]
+   
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "biasing_list": biasing_list,
+            "wav_lens": wav_lens,
+            "targets": targets,
+        }
+        
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "targets"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
+
 class WhisperTextCollatorWhithPadding_librispeech_without_bert:
     def __call__(self, features):
         input_ids, labels, dec_input_ids, translated_texts_1, translated_texts_2, wav_lens, audio = [], [], [], [], [], [], []
@@ -843,7 +889,6 @@ def whisper_flamingo_projection_optimizer(model, cfg, t_total):
     return optimizer, scheduler
 
 def whisper_flamingo_optimizer(model, cfg, t_total):
-    # x_attn = ["gated_x_attn", "attn_gate", "ff", "resnet", "reprogramming_layer"]
     x_attn = ["gated_x_attn", "attn_gate", "ff", "keyword_cross_attn"]
 
     optimizer_grouped_parameters = [
@@ -862,6 +907,35 @@ def whisper_flamingo_optimizer(model, cfg, t_total):
         optimizer, num_warmup_steps=cfg.warmup_steps,
         num_training_steps=t_total
     )
+    return optimizer, scheduler
+
+def whisper_biasing_optimizer(model, cfg, t_total):
+    biasing_keywords = ["pointer_gate", "Qproj", "Kproj", "ooKBemb"]
+    
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                param
+                for name, param in model.named_parameters()
+                if any(keyword in name for keyword in biasing_keywords)
+            ],
+            "lr": cfg.learning_rate,
+        },
+    ]
+    
+    optimizer = AdamW(
+        optimizer_grouped_parameters,
+        lr=cfg.learning_rate,
+        eps=cfg.adam_epsilon,
+        weight_decay=cfg.weight_decay,
+    )
+    
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=cfg.warmup_steps,
+        num_training_steps=t_total,
+    )
+    
     return optimizer, scheduler
 
 def setup_logging_and_checkpoint(log_output_dir, check_output_dir, train_name, train_id, monitor):
@@ -1168,7 +1242,7 @@ def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, a
 
     return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
 
-def get_all_keywords(mandarin_text, dictionary, separate=False):
+def get_all_keywords(mandarin_text, dictionary):
     # 句子斷詞
     mandarin_text_list = mandarin_text.split()
 
@@ -1178,14 +1252,8 @@ def get_all_keywords(mandarin_text, dictionary, separate=False):
     # 查找每個詞彙是否有華台翻譯，並將所有翻譯加入 all_keywords
     for word in mandarin_text_list:
         if word in dictionary:
-            # print(f"word: {word}, keywords: {dictionary[word]}")
             all_keywords.extend(dictionary[word])  # 再加入所有翻譯
-
-    if separate == True:
-        return all_keywords
-    
-    all_keywords = "".join(all_keywords)
-    
+   
     return all_keywords
 
 def get_grouped_keywords(mandarin_text, dictionary, separate=False):
