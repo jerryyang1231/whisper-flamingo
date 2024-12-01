@@ -31,7 +31,7 @@ from utils import (
 from utils_biasing import BiasingProcessor_taigi
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
@@ -187,16 +187,21 @@ class WhisperTextModule(LightningModule):
     def training_step(self, batch, batch_id):
         
         input_ids = batch["input_ids"]
-        labels = batch["labels"].long()
-        dec_input_ids = batch["dec_input_ids"].long()
         biasing_list = batch["biasing_list"] 
         targets = batch["targets"].long()
         
-        lextree = self.biasproc.get_lextree(biasing_list)
+        # 對每個樣本分別構造 lextree
+        lextrees = []
+        for blist in biasing_list:
+            lextrees.append(self.biasproc.get_lextree(blist))
+
+        # 確保 lextrees 是一個 batch_size 長度的列表，每個元素對應一個樣本的樹
+        assert len(lextrees) == len(biasing_list), "Mismatch between lextrees and batch size"
+        
         targetmask = targets != -100
         targets = targets * targetmask
-        
-        loss, _ = self.model.forward(input_ids, targets, lextree, sotlen)
+
+        loss, _ = self.model.forward(input_ids, targets, lextrees, sotlen)
         
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
         
@@ -205,28 +210,29 @@ class WhisperTextModule(LightningModule):
     def validation_step(self, batch, batch_id, dataloader_idx=None):
         
         input_ids = batch["input_ids"]
-        labels = batch["labels"].long()
-        dec_input_ids = batch["dec_input_ids"].long()
         biasing_list = batch["biasing_list"]  
         targets = batch["targets"].long()
 
-        lextree = self.biasproc.get_lextree(biasing_list)
+        # 對每個樣本分別構造 lextree
+        lextrees = []
+        for blist in biasing_list:
+            lextrees.append(self.biasproc.get_lextree(blist))
+
+        # 確保 lextrees 是一個 batch_size 長度的列表，每個元素對應一個樣本的樹
+        assert len(lextrees) == len(biasing_list), "Mismatch between lextrees and batch size"
+        
         targetmask = targets != -100
         targets = targets * targetmask
 
-        loss, out_at = self.model.forward(input_ids, targets, lextree, sotlen)
+        loss, out_at = self.model.forward(input_ids, targets, lextrees, sotlen)
 
         targets = targets[:, sotlen:]
         
         out_at = out_at.view(targets.size(0), targets.size(1), -1).max(dim=-1)[1]
-
-        # labels[labels == -100] = self.tokenizer.eot
         
         mod_list = {"at": out_at}
         for mod, out in mod_list.items():
-            # loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
             # remove all decoder predictions after first eot for proper decoding
-            # tokens = torch.argmax(out, dim=2)
             tokens = out
             # Set all decoder predictions after first eot to eot
             # TODO: fix for large-v3, which predicts <eot> in the beginning
@@ -287,17 +293,6 @@ class WhisperTextModule(LightningModule):
         else:
             optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)
         self.optimizer, self.scheduler = optimizer, scheduler
-        
-        # 檢查哪些參數正在被優化
-        print("=== Checking Optimized Parameters ===")
-        all_params = set(n for n, _ in model.named_parameters())
-        optimized_params = set(p for group in optimizer.param_groups for p in group["params"])
-
-        for name, param in model.named_parameters():
-            if param in optimized_params:
-                print(f"Optimized: {name}")
-            else:
-                print(f"Not Optimized: {name}")        
         
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
@@ -395,7 +390,7 @@ if __name__ == "__main__":
                                                                                     cfg.filename)
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
-    
+
     # options = whisper.DecodingOptions(language="zh", fp16=False, without_timestamps=True)
     # tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language="zh")
     # decodetask = whisper.decoding.DecodingTask(model, options)
@@ -430,12 +425,12 @@ if __name__ == "__main__":
 
     # TODO: save config file tp the checkpoint dir, also for pre-trained model
     print(cfg)
-    resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
+    resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"    
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

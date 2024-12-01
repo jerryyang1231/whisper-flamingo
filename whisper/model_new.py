@@ -268,12 +268,20 @@ class TextDecoder(nn.Module):
         self.register_buffer("mask", mask, persistent=False)
         self.dropout_rate = dropout_rate
         self.dropout = torch.nn.Dropout(dropout_rate)     
+
+        self.bert_encoder = bert_encoder
+        if bert_encoder:
+            # 初始化 BERT 模型
+            self.bert_model = BertModel.from_pretrained('bert-base-chinese')
         
         if bert_hidden_size != n_state:
             self.xt_projection = nn.Linear(bert_hidden_size, n_state)
         else:
             self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
         
+        self.add_resnet = add_resnet
+        if add_resnet:
+            self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
         self.mode = mode
 
 
@@ -529,14 +537,16 @@ class Whisper(nn.Module):
     def logits(self, tokens: torch.Tensor, audio_features: torch.Tensor):
         return self.decoder(tokens, audio_features)
 
-    def forward(self, mel, targets, lextrees, sotlen) -> Dict[str, torch.Tensor]:
+    def forward(self, mel, targets, lextree, sotlen) -> Dict[str, torch.Tensor]:
         # 編碼器處理音頻
         encoder_out = self.encoder(mel)
 
         # 解碼器獲取 logits 和 hidden states
         logits, hidden = self.decoder.get_states(targets, encoder_out)
 
-        if self.biasing :
+        if self.biasing and lextree is not None:
+            # 重複 lextree 以適應 batch size
+            lextrees = [lextree for _ in range(targets.size(0))]
 
             # 初始化變量
             hptrs = []

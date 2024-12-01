@@ -5,7 +5,7 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset  # 載入 Hugging Face 的 datasets
+from datasets import load_dataset 
 from torch.utils.data import Dataset
 import pandas as pd
 import whisper
@@ -34,7 +34,7 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertTokenizer, BertModel
 
 # my command
-# CUDA_VISIBLE_DEVICES=0 python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_small_bert.yaml
+# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_small_bert.yaml
 # CUDA_VISIBLE_DEVICES=1 python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-deu_small_bert.yaml
 
 SAMPLE_RATE = 16000
@@ -285,15 +285,14 @@ class WhisperTextModule(LightningModule):
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
         translation_1 = batch["translation_1"]  # 保持為文本列表
+        audio = batch["audio"]
+        wav_lens = batch["wav_lens"] 
         
         # 檢查 batch 中是否有 translation_2，沒有則設為 None
         bert_hidden_states_2 = None
         translation_2 = batch.get("translation_2", None)
         if translation_2 is not None:
             translation_2 = translation_2
-
-        audio = batch["audio"]
-        wav_lens = batch["wav_lens"] 
         
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs_1 = self.bert_tokenizer(
@@ -354,7 +353,6 @@ class WhisperTextModule(LightningModule):
             out_at = self.model.decoder(dec_input_ids, features_a, xt_1=bert_hidden_states_1, xt_2=bert_hidden_states_2)            
             labels[labels == -100] = self.tokenizer.eot
 
-            # mod_list = {"at": out_at, "a": out_a, "t": out_t} if cfg.add_gated_x_attn == 0 else {"at": out_at}
             mod_list = {"at": out_at}
             for mod, out in mod_list.items():
                 loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))

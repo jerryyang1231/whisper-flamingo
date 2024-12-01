@@ -28,7 +28,7 @@ from utils import (
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
@@ -344,8 +344,12 @@ class WhisperTextModule(LightningModule):
         labels[labels == -100] = self.tokenizer.eot
 
         mod_list = {"at": out_at}
-        for mod, out in mod_list.items():
+        for mod, out in mod_list.items():   
+            print("out :", out)       
+            print("out.shape :", out.shape)       
             loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
+            print("loss :", loss)
+            # print("loss.shape :", loss.shape)
             # remove all decoder predictions after first eot for proper decoding
             tokens = torch.argmax(out, dim=2)
 
@@ -384,12 +388,12 @@ class WhisperTextModule(LightningModule):
             
             wer, cer = wer_cer(hypo=o_list, ref=l_list)
 
-            print("Mod: {}".format(mod))
-            for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
-                print("="*100)
-                print("PRED: {}".format(hypo))
-                print("REF:  {}".format(ref))
-                if i == 1: break
+            # print("Mod: {}".format(mod))
+            # for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
+            #     print("="*100)
+            #     print("PRED: {}".format(hypo))
+            #     print("REF:  {}".format(ref))
+            #     if i == 1: break
             
             log_prefix = {0: 'val', 1: 'test'}
             self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
@@ -535,7 +539,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()
