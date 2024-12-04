@@ -25,7 +25,6 @@ dropout_rate: 0
 lang: zh
 resume_training: false
 
-# pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
 pt_ckpt: ''
 train_id: whisper_taigi_small
 

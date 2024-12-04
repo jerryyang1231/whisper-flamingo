@@ -344,12 +344,8 @@ class WhisperTextModule(LightningModule):
         labels[labels == -100] = self.tokenizer.eot
 
         mod_list = {"at": out_at}
-        for mod, out in mod_list.items():   
-            print("out :", out)       
-            print("out.shape :", out.shape)       
+        for mod, out in mod_list.items():         
             loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
-            print("loss :", loss)
-            # print("loss.shape :", loss.shape)
             # remove all decoder predictions after first eot for proper decoding
             tokens = torch.argmax(out, dim=2)
 
@@ -388,12 +384,12 @@ class WhisperTextModule(LightningModule):
             
             wer, cer = wer_cer(hypo=o_list, ref=l_list)
 
-            # print("Mod: {}".format(mod))
-            # for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
-            #     print("="*100)
-            #     print("PRED: {}".format(hypo))
-            #     print("REF:  {}".format(ref))
-            #     if i == 1: break
+            print("Mod: {}".format(mod))
+            for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
+                print("="*100)
+                print("PRED: {}".format(hypo))
+                print("REF:  {}".format(ref))
+                if i == 1: break
             
             log_prefix = {0: 'val', 1: 'test'}
             self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
@@ -494,9 +490,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small parallel_flamingo"
-            # name="whisbert-flamingo taigi small parallel_flamingo (translation only)"
-            # name="whisbert-flamingo taigi small parallel_flamingo (keyword only)"
+            name="whisbert-flamingo taigi small parallel_flamingo keyword remove gate"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 

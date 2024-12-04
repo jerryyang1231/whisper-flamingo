@@ -268,20 +268,12 @@ class TextDecoder(nn.Module):
         self.register_buffer("mask", mask, persistent=False)
         self.dropout_rate = dropout_rate
         self.dropout = torch.nn.Dropout(dropout_rate)     
-
-        self.bert_encoder = bert_encoder
-        if bert_encoder:
-            # 初始化 BERT 模型
-            self.bert_model = BertModel.from_pretrained('bert-base-chinese')
         
         if bert_hidden_size != n_state:
             self.xt_projection = nn.Linear(bert_hidden_size, n_state)
         else:
             self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
         
-        self.add_resnet = add_resnet
-        if add_resnet:
-            self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
         self.mode = mode
 
 
@@ -448,8 +440,10 @@ class Whisper(nn.Module):
                     index_list.append(list(new_tree[0].keys()))
                 else:
                     new_tree = new_tree[0][char_idx]
+                    # 有可能走到 leaf node
                     index_list.append(list(new_tree[0].keys()))
                     if new_tree[1] != -1:
+                        # 把 root 的 children 加進 index list maybe 算是拉一道保險 ?
                         index_list[-1].extend(list(origTries[i][0].keys()))
                         extended_list = list(origTries[i][0].keys())
             else:
@@ -460,8 +454,8 @@ class Whisper(nn.Module):
                     new_tree = new_tree[char_idx]
                     index_list.append(list(new_tree[0].keys()))
                     if new_tree[1] != -1:
-                         index_list[-1].extend(list(origTries[i][0].keys()))
-                         extended_list = list(origTries[i][0].keys())
+                        index_list[-1].extend(list(origTries[i][0].keys()))
+                        extended_list = list(origTries[i][0].keys())            
             if char_idx > 0:
                 p_gen_mask.append(0)
             else:
@@ -505,13 +499,13 @@ class Whisper(nn.Module):
             meeting_KB=[],
         ):
         if getattr(self, "GNN", None) is None or meeting_KB == []:
-            meeting_KB = torch.cat([self.decoder.token_embedding.weight.data, self.ooKBemb.weight], dim=0)
-            meeting_KB = meeting_KB[index_list]
-        meeting_KB = self.Bdrop(self.Kproj(meeting_KB))
+            meeting_KB = torch.cat([self.decoder.token_embedding.weight.data, self.ooKBemb.weight], dim=0) #　[vocab_size + 1, hidden_size]
+            meeting_KB = meeting_KB[index_list] # [batch_size, max_len, hidden_size]
+        meeting_KB = self.Bdrop(self.Kproj(meeting_KB)) # [batch_size, max_len, attndim]
         KBweight = torch.einsum('ijk,ik->ij', meeting_KB, query)
         KBweight = KBweight / math.sqrt(query.size(-1))
         KBweight.masked_fill_(meeting_mask.bool(), -1e4)
-        KBweight = torch.nn.functional.softmax(KBweight, dim=-1)
+        KBweight = torch.nn.functional.softmax(KBweight, dim=-1)        
         if meeting_KB.size(1) > 1:
             KBembedding = torch.einsum('ijk,ij->ik', meeting_KB[:,:-1,:], KBweight[:,:-1])
         else:
@@ -521,11 +515,10 @@ class Whisper(nn.Module):
     
     def calc_ptr_loss(self, ptr_dist, model_dist, ptr_gen, ptr_gen_mask,
                       targets, ignore_idx=-100, reduction_str='none'):
-        ptr_gen = ptr_gen.squeeze(-1).masked_fill(ptr_gen_mask.bool(), 0).reshape(-1, 1) # [batch_size * seq_len, 1]
+        ptr_gen = ptr_gen.squeeze(-1).masked_fill(ptr_gen_mask.bool(), 0).reshape(-1, 1) # [batch_size * seq_len, 1
         # the gap to 1 is the prob for <unk>, which indicates not in the KB
-        ptr_gen_complement = (ptr_dist[:,:,-1].reshape(targets.size(0), -1)) * ptr_gen # [batch_size * seq_len, 1]
-        # print((ptr_dist[:,:,:-1].reshape(targets.size(0), -1) * ptr_gen).sum(-1).max())
-        p_final = ptr_dist[:,:,:-1].reshape(targets.size(0), -1) * ptr_gen + model_dist * (1 - ptr_gen + ptr_gen_complement) # [batch_size * seq_len, vocab_size]
+        ptr_gen_complement = (ptr_dist[:,:,-1].reshape(targets.size(0), -1)) * ptr_gen # [batch_size * seq_len, 1]        
+        p_final = ptr_dist[:,:,:-1].reshape(targets.size(0), -1) * ptr_gen + model_dist * (1 - ptr_gen + ptr_gen_complement) # [batch_size * seq_len, vocab_size]       
         p_loss = F.nll_loss(torch.log(p_final+1e-9), targets,
                             ignore_index=ignore_idx, reduction=reduction_str)
         p_loss = p_loss.sum() / (p_loss != 0).sum()
@@ -537,18 +530,14 @@ class Whisper(nn.Module):
     def logits(self, tokens: torch.Tensor, audio_features: torch.Tensor):
         return self.decoder(tokens, audio_features)
 
-    def forward(self, mel, targets, lextree, sotlen) -> Dict[str, torch.Tensor]:
+    def forward(self, mel, targets, lextrees=None, sotlen=4) -> Dict[str, torch.Tensor]:
         # 編碼器處理音頻
         encoder_out = self.encoder(mel)
 
         # 解碼器獲取 logits 和 hidden states
         logits, hidden = self.decoder.get_states(targets, encoder_out)
 
-        if self.biasing and lextree is not None:
-            # 重複 lextree 以適應 batch size
-            lextrees = [lextree for _ in range(targets.size(0))]
-
-            # 初始化變量
+        if self.biasing :
             hptrs = []
             tcpgen_dists = []
             p_gen_masks = []
@@ -556,9 +545,8 @@ class Whisper(nn.Module):
             query = self.Bdrop(self.Qproj(hidden))  # [batch_size, seq_len, attndim]
 
             for i in range(query.size(1)):
-                yseq = targets[:, i]
                 step_mask, step_embs, trees, p_gen_mask, back_transform, index_list = self.get_step_biasing_embs_prefix(
-                    yseq, trees, lextrees)
+                    targets[:, i], trees, lextrees)
                 hptr, tcpgen_dist = self.get_meetingKB_emb_map(
                     query[:, i], step_mask, back_transform, index_list)
                 hptrs.append(hptr)
@@ -567,10 +555,10 @@ class Whisper(nn.Module):
 
             Hptr = torch.stack(hptrs, dim=1)  # [batch_size, seq_len, attndim]
             tcpgen_dist = torch.stack(tcpgen_dists, dim=1)  # [batch_size, seq_len, vocab_size]
+            
             gen_prob = torch.sigmoid(self.pointer_gate(torch.cat([Hptr, hidden], dim=-1)))
             p_gen_masks = torch.tensor(p_gen_masks).to(query.device).byte().t()
-
-            model_dist = torch.softmax(logits[:, sotlen-1:-1], dim=-1)  # 調整索引以匹配序列長度
+            model_dist = torch.softmax(logits[:, sotlen-1:-1], dim=-1) 
             model_dist = model_dist.view(-1, model_dist.size(-1))
 
             loss, output = self.calc_ptr_loss(

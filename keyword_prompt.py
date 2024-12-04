@@ -18,27 +18,24 @@ from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
-    WhisperTextCollatorWhithPadding_taigi_biasing,
+    WhisperDataCollatorWhithPadding_taigi,
     whisper_optimizer,
-    whisper_flamingo_optimizer,
-    whisper_biasing_optimizer,
     setup_logging_and_checkpoint_taigi,
     wer_cer,
     DistributedSamplerWrapper,
     get_all_keywords,
-    get_grouped_keywords
 )
-from utils_biasing import BiasingProcessor_taigi
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+from transformers import BertModel, BertTokenizer
 import json
 
 # my command
-# python -u biasing.py config/audio-text/at_taigi_small_biasing.yaml
+# python -u keyword_prompt.py config/audio-text/at_taigi_small_keyword_prompt.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -76,7 +73,7 @@ class YTTDTaigiTRSDataset(Dataset):
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
-        self.dictionary = dictionary  # 儲存辭典以便後續使用
+        self.dictionary = dictionary 
 
     def __len__(self):
         return len(self.dataset)
@@ -84,8 +81,7 @@ class YTTDTaigiTRSDataset(Dataset):
     def __getitem__(self, id):
         lang = cfg.lang
         item = self.dataset[id]
-        
-        # 獲取音頻數據和文本
+
         wav_data = item['audio']['array']
         text = item['text']
         mandarin_text = item['text_mandarin']
@@ -93,16 +89,10 @@ class YTTDTaigiTRSDataset(Dataset):
 
         text = self.text_normalizer(text)
         text = text.replace(" ", "")
-        
+
         all_keywords = get_all_keywords(mandarin_text, self.dictionary)
-        
-        # 將關鍵詞轉換為 biasing_list
-        biasing_list = []
-        if all_keywords:
-            for keyword in all_keywords:
-                # 將關鍵詞編碼為 token IDs
-                tok_word = self.tokenizer.encode(" " + keyword)
-                biasing_list.append(tuple(tok_word))
+        all_keywords = [self.text_normalizer(word).replace(" ", "") for word in all_keywords]
+        filtered_keywords = [word for word in all_keywords if word in text]
         
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
@@ -123,22 +113,27 @@ class YTTDTaigiTRSDataset(Dataset):
                 mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
             else:
                 raise NotImplementedError 
+        
+        prompt_ids = [self.tokenizer.sot_prev] + \
+                        self.tokenizer.encode(" " + " ".join(filtered_keywords)) 
+        prompt_lens = len(prompt_ids)
 
-        dec_input_ids = [self.tokenizer.sot, 
+        dec_input_ids = prompt_ids + \
+                        [self.tokenizer.sot, 
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
-                        self.tokenizer.encode(" " + text)     
+                        self.tokenizer.encode(" " + text)
+
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
-        targets = dec_input_ids + [self.tokenizer.eot]
+        labels[:prompt_lens - 1] = [-100] * (prompt_lens - 1)
         
         return {
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "biasing_list": biasing_list,
             "wav_lens": wav_lens,
-            "targets": targets,
+            "prompt_lens": prompt_lens,
         }
 
 class WhisperTextModule(LightningModule):
@@ -146,7 +141,6 @@ class WhisperTextModule(LightningModule):
         super().__init__()
         self.model_name = model_name
         print("Loading Whisper model and weights")
-        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
         self.model = whisper.load_model(model_name,
                                         device='cpu', # avoid OOM on gpu 0 for distributed
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
@@ -156,8 +150,7 @@ class WhisperTextModule(LightningModule):
                                         add_resnet= cfg.add_resnet,
                                         num_resnet_layer=cfg.num_resnet_layer,
                                         mode = cfg.mode,
-                                        biasing = cfg.biasing,  # 開啟偏置處理
-                                        tokenizer = self.tokenizer,  # 傳入 tokenizer
+                                        sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         )
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
@@ -172,13 +165,13 @@ class WhisperTextModule(LightningModule):
                 # print(str(e))
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
-
+                
+        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+
         self.cfg = cfg        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
-        
-        self.biasproc = BiasingProcessor_taigi(self.tokenizer, self.model.dims.n_vocab)
 
 
     def forward(self, x):
@@ -189,15 +182,16 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        biasing_list = batch["biasing_list"] 
-        targets = batch["targets"].long()
         
-        lextree = self.biasproc.get_lextree(biasing_list)
-        targetmask = targets != -100
-        targets = targets * targetmask
+        if self.cfg.prompt != 0: # freeze whisper encoder gradients for prompt
+            for p in self.model.encoder.parameters():
+                p.requires_grad = False
+
+        audio_features = self.model.encoder(input_ids, training=True)
+
+        out = self.model.decoder(dec_input_ids, audio_features)
         
-        loss, _ = self.model.forward(input_ids, targets, lextree, sotlen)
-        
+        loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
         
         return loss
@@ -207,51 +201,62 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        biasing_list = batch["biasing_list"]  
-        targets = batch["targets"].long()
+        prompt_lens = batch["prompt_lens"]
 
-        lextree = self.biasproc.get_lextree(biasing_list)
-        targetmask = targets != -100
-        targets = targets * targetmask
-
-        loss, out_at = self.model.forward(input_ids, targets, lextree, sotlen)
-
-        targets = targets[:, sotlen:]
+        audio_features = self.model.encoder(input_ids)
         
-        out_at = out_at.view(targets.size(0), targets.size(1), -1).max(dim=-1)[1]
-
-        # labels[labels == -100] = self.tokenizer.eot
+        out_at = self.model.decoder(dec_input_ids, audio_features)
         
+        labels[labels == -100] = self.tokenizer.eot
+
         mod_list = {"at": out_at}
-        for mod, out in mod_list.items():
-            # loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
+        for mod, out in mod_list.items():         
+            # 計算損失，損失函數會自動忽略 -100 的位置
+            loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
+
             # remove all decoder predictions after first eot for proper decoding
-            # tokens = torch.argmax(out, dim=2)
-            tokens = out
+            tokens = torch.argmax(out, dim=2)
+
             # Set all decoder predictions after first eot to eot
             # TODO: fix for large-v3, which predicts <eot> in the beginning
             eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-                        
+                    
             # 針對每個序列進行檢查
             for i in range(eot_find.shape[0]):
-                if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
-                    first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
-                    tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+                # 找出所有 eot 的位置
+                eot_positions = (tokens[i] == self.tokenizer.eot).nonzero(as_tuple=False)
+                
+                if eot_positions.numel() > 3:  # 確保有至少 4 個 eot
+                    # 從第4個 eot 開始，將後續 token 設置為 eot
+                    fourth_eot = eot_positions[3].item()  # 第4個 eot 的索引
+                    tokens[i, fourth_eot + 1:] = self.tokenizer.eot
 
-            # calculate next token prediction, not include lang tag, task, and no timestamps token
-            mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
+            # 計算準確率，忽略 -100 的位置
+            mask = (labels != -100) & (labels != self.tokenizer.eot)
             n_correct = torch.sum(
-                tokens[:, 3:].masked_select(mask).eq(targets[:, 3:].masked_select(mask))
+                tokens.masked_select(mask).eq(labels.masked_select(mask))
             )
+            
             total = torch.sum(mask)
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0
-                           
-            o_list, o_list_full, l_list, l_list_full = [], [], [], []
-            for o, l in zip(tokens, targets):
-                # 解碼並過濾掉特殊標籤
-                decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
-                decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
+
+            # 計算 WER 和 CER
+            o_list, l_list = [], []
+            for idx, (o, l, prompt_len) in enumerate(zip(tokens, labels, prompt_lens)):
+                prompt_len = prompt_len.item() 
+                
+                # 排除 prompt_ids 部分
+                o = o[prompt_len:]  
+                
+                # 過濾掉特殊標籤和忽略的標籤
+                o_filtered = [t for t in o if t.item() not in self.special_token_set]
+                l_filtered = [t for t in l if t.item() not in self.special_token_set and t.item() != -100]
+                
+                # 解碼
+                decoded_o = self.tokenizer.decode(o_filtered)
+                
+                decoded_l = self.tokenizer.decode(l_filtered)
                 
                 # 正規化文本並移除空格
                 normalized_o = self.text_normalizer(decoded_o).replace(" ", "")
@@ -280,25 +285,8 @@ class WhisperTextModule(LightningModule):
        
     def configure_optimizers(self):
         model = self.model
-        if self.cfg.add_gated_x_attn != 0:
-            optimizer, scheduler = whisper_flamingo_optimizer(model, self.cfg, self.t_total)
-        elif self.cfg.biasing:
-            optimizer, scheduler = whisper_biasing_optimizer(model, self.cfg, self.t_total)
-        else:
-            optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)
+        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)        
         self.optimizer, self.scheduler = optimizer, scheduler
-        
-        # 檢查哪些參數正在被優化
-        print("=== Checking Optimized Parameters ===")
-        all_params = set(n for n, _ in model.named_parameters())
-        optimized_params = set(p for group in optimizer.param_groups for p in group["params"])
-
-        for name, param in model.named_parameters():
-            if param in optimized_params:
-                print(f"Optimized: {name}")
-            else:
-                print(f"Not Optimized: {name}")        
-        
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
     def setup(self, stage=None):
@@ -326,7 +314,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_biasing())
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -346,7 +334,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_biasing())
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -366,8 +354,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_biasing())
-
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -381,10 +368,11 @@ if __name__ == "__main__":
     # 讀取您的 JSON 華台辭典
     with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
         dictionary = json.load(f)
+
     # Initialize WandB
-    wandb.init(project="whisper-biasing",
+    wandb.init(project="KG-whisper",
             config=cfg,
-            name="whisper-biasing taigi small "
+            name="whisper taigi small keyword prompt"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -395,19 +383,6 @@ if __name__ == "__main__":
                                                                                     cfg.filename)
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            print(f"{name}: Grad norm: {param.grad.norm().item()}")
-        else:
-            print(f"{name}: No grad")
-
-    # options = whisper.DecodingOptions(language="zh", fp16=False, without_timestamps=True)
-    # tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language="zh")
-    # decodetask = whisper.decoding.DecodingTask(model, options)
-    # logit_filters = decodetask.logit_filters
-    # sot_sequence = decodetask.sot_sequence
-    # sotlen = len(sot_sequence)
-    sotlen = 4
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
@@ -440,7 +415,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

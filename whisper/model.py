@@ -13,7 +13,7 @@ from .decoding import decode as decode_function
 from .decoding import detect_language as detect_language_function
 from .transcribe import transcribe as transcribe_function
 
-import math  # 添加必要的導入
+from transformers import BertModel, BertTokenizer
 
 @dataclass
 class ModelDimensions:
@@ -157,6 +157,7 @@ class ResidualAttentionBlock(nn.Module):
     
     def apply_gated_x_attn_parallel(self, x, xt_1, xt_2):
         x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0] * self.attn_gate_1.tanh()
+        # x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0]
         x_2 = self.gated_x_attn_2(self.gated_x_attn_ln_2(x), xt_2)[0] * self.attn_gate_2.tanh()
         x = x + x_1 + x_2
         x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
@@ -194,6 +195,32 @@ class ResidualAttentionBlock(nn.Module):
         x = x + self.mlp(self.mlp_ln(x))        
         return x
 
+class ResNet1D(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers):
+        super(ResNet1D, self).__init__()
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers):
+            print(f"Add ResNet layers")
+            self.layers.append(nn.Sequential(
+                nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Conv1d(hidden_dim, input_dim, kernel_size=3, padding=1),
+                nn.BatchNorm1d(input_dim)
+            ))
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # x 形狀: (batch_size, seq_length, input_dim)
+        x = x.permute(0, 2, 1)  # 轉換為 (batch_size, input_dim, seq_length)
+        for layer in self.layers:
+            identity = x
+            out = layer(x)
+            out += identity
+            out = self.relu(out)
+            x = out
+        x = x.permute(0, 2, 1)  # 轉回 (batch_size, seq_length, input_dim)
+        return x
 
 class AudioEncoder(nn.Module):
     def __init__(
@@ -268,14 +295,19 @@ class TextDecoder(nn.Module):
         self.register_buffer("mask", mask, persistent=False)
         self.dropout_rate = dropout_rate
         self.dropout = torch.nn.Dropout(dropout_rate)     
+
+        self.bert_encoder = bert_encoder
         
         if bert_hidden_size != n_state:
             self.xt_projection = nn.Linear(bert_hidden_size, n_state)
         else:
             self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
         
+        self.add_resnet = add_resnet
+        if add_resnet:
+            self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
+        
         self.mode = mode
-
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
                 xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None,
@@ -295,7 +327,7 @@ class TextDecoder(nn.Module):
         x = x.to(xa.dtype)
 
         # Process xt_1 and xt_2 based on the specified mode
-        if self.mode == "mix":           
+        if self.mode == "mix":            
             # xt_1 without BERT and without positional embedding
             if xt_1 is not None:
                 if self.add_resnet:
@@ -322,7 +354,7 @@ class TextDecoder(nn.Module):
                 if self.add_resnet:
                     xt_1 = self.resnet(xt_1)
                 # No positional embedding for xt_1 in "mix" mode
-                xt_1 = xt_1.to(xa.dtype)       
+                xt_1 = xt_1.to(xa.dtype)         
         
         # Pass through the layers
         for layer, block in enumerate(self.blocks):
@@ -337,32 +369,12 @@ class TextDecoder(nn.Module):
         ).float()
         
         return logits
-    
-    def get_states(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None):
-        """
-        x : torch.LongTensor, shape = (batch_size, <= n_ctx)
-            the text tokens
-        xa : torch.Tensor, shape = (batch_size, n_mels, n_audio_ctx)
-            the encoded audio features to be attended on
-        """
-        offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
-        x = self.token_embedding(x) + self.positional_embedding[offset : offset + x.shape[-1]]
-        x = x.to(xa.dtype)
-
-        for block in self.blocks:
-            x = block(x, xa, mask=self.mask, kv_cache=kv_cache)
-
-        x = self.ln(x)
-        logits = (x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)).float()
-
-        return logits, x
 
 class Whisper(nn.Module):
     def __init__(self, dims: ModelDimensions, dropout_rate: float, video: bool, 
                  video_model_path: str, av_hubert_path: str, prob_av: float, prob_a: float, av_hubert_encoder: bool,
                  av_fusion: str, add_adapter: bool, adapter_dim: int, add_gated_x_attn: int, 
-                 bert_encoder: bool, bert_dim: int, add_resnet: bool, num_resnet_layer: int, mode: str, sequential_gated_x_attn: bool,
-                 biasing: bool, attndim: int, tokenizer=None,):
+                 bert_encoder: bool, bert_dim: int, add_resnet: bool, num_resnet_layer: int, mode: str, sequential_gated_x_attn: bool):
         super().__init__()
         self.dims = dims
         self.encoder = AudioEncoder(
@@ -397,131 +409,6 @@ class Whisper(nn.Module):
             mode,
             sequential_gated_x_attn,
         )
-        
-        self.biasing = biasing
-        if self.biasing:
-            self.tokenizer = tokenizer
-            self.eos = self.tokenizer.eot
-            self.nvocab = dims.n_vocab
-            
-            self.hiddim = dims.n_text_state
-            self.attndim = attndim 
-            self.treehid = self.dims.n_text_state 
-            
-            self.pointer_gate = nn.Linear(self.attndim + self.hiddim, 1)
-            self.Qproj = nn.Linear(self.hiddim, self.attndim)
-            self.Kproj = nn.Linear(self.treehid, self.attndim)
-            self.ooKBemb = nn.Embedding(1, self.treehid)
-            self.Bdrop = nn.Dropout(dropout_rate)  # 使用與模型一致的 dropout_rate
-
-            lecun_normal_init_parameters(self.Qproj)
-            lecun_normal_init_parameters(self.Kproj)
-            lecun_normal_init_parameters(self.pointer_gate)
-            lecun_normal_init_parameters(self.ooKBemb)
-    
-    def get_step_biasing_embs_prefix(self, yseq, trees, origTries):
-        ooKB_id = self.nvocab
-        p_gen_mask = []
-        maxlen = 0
-        index_list = []
-        new_trees = []
-        masks_list = []
-        step_embs = []
-        for i, char_idx in enumerate(yseq):
-            new_tree = trees[i][0]
-            char_idx = char_idx.item()
-            extended_list = []
-            if char_idx == self.eos:
-                new_tree = origTries[i].copy()
-                index_list.append(list(new_tree[0].keys()))
-            elif char_idx > 0 and self.tokenizer.decode([char_idx]).startswith(' '):
-                new_tree =  origTries[i].copy()
-                if char_idx not in new_tree[0]:
-                    index_list.append(list(new_tree[0].keys()))
-                else:
-                    new_tree = new_tree[0][char_idx]
-                    index_list.append(list(new_tree[0].keys()))
-                    if new_tree[1] != -1:
-                        index_list[-1].extend(list(origTries[i][0].keys()))
-                        extended_list = list(origTries[i][0].keys())
-            else:
-                if char_idx not in new_tree:
-                    new_tree = origTries[i].copy()
-                    index_list.append(list(new_tree[0].keys()))
-                else:
-                    new_tree = new_tree[char_idx]
-                    index_list.append(list(new_tree[0].keys()))
-                    if new_tree[1] != -1:
-                         index_list[-1].extend(list(origTries[i][0].keys()))
-                         extended_list = list(origTries[i][0].keys())
-            if char_idx > 0:
-                p_gen_mask.append(0)
-            else:
-                p_gen_mask.append(1)
-            new_trees.append(new_tree)
-            if len(index_list[-1]) > maxlen:
-                maxlen = len(index_list[-1])
-
-            if getattr(self, "GNN", None) is not None:
-                step_emb = [new_tree[0][key][3] for key in new_tree[0].keys()]
-                if extended_list != []:
-                    step_emb.extend([origTries[i][0][key][3] for key in extended_list])
-                if len(step_emb) > 0:
-                    step_embs.append(torch.cat(step_emb, dim=0))
-                else:
-                    step_embs.append(to_device(self, torch.empty(0, self.tree_hid)))
-        maxlen += 1
-        step_mask = []
-        back_transform = torch.zeros(len(new_trees), maxlen, ooKB_id+1, device=yseq.device)
-        ones_mat = torch.ones(back_transform.size(), device=yseq.device)
-        for i, indices in enumerate(index_list):
-            step_mask.append(len(indices) * [0] + (maxlen - len(indices) - 1) * [1] + [0])
-            if getattr(self, "GNN", None) is not None:
-                pad_embs = self.ooKBemb.weight.repeat(maxlen-len(indices), 1)
-                step_embs[i] = torch.cat([step_embs[i], pad_embs], dim=0)
-            indices += [ooKB_id] * (maxlen - len(indices))
-        step_mask = torch.tensor(step_mask).byte().to(yseq.device)
-        index_list = torch.LongTensor(index_list).to(yseq.device)
-        back_transform.scatter_(dim=-1, index=index_list.unsqueeze(-1), src=ones_mat)
-        if getattr(self, "GNN", None) is not None:
-            step_embs = torch.stack(step_embs)
-
-        return step_mask, step_embs, new_trees, p_gen_mask, back_transform, index_list
-    
-    def get_meetingKB_emb_map(
-            self,
-            query,
-            meeting_mask,
-            back_transform,
-            index_list,
-            meeting_KB=[],
-        ):
-        if getattr(self, "GNN", None) is None or meeting_KB == []:
-            meeting_KB = torch.cat([self.decoder.token_embedding.weight.data, self.ooKBemb.weight], dim=0)
-            meeting_KB = meeting_KB[index_list]
-        meeting_KB = self.Bdrop(self.Kproj(meeting_KB))
-        KBweight = torch.einsum('ijk,ik->ij', meeting_KB, query)
-        KBweight = KBweight / math.sqrt(query.size(-1))
-        KBweight.masked_fill_(meeting_mask.bool(), -1e4)
-        KBweight = torch.nn.functional.softmax(KBweight, dim=-1)
-        if meeting_KB.size(1) > 1:
-            KBembedding = torch.einsum('ijk,ij->ik', meeting_KB[:,:-1,:], KBweight[:,:-1])
-        else:
-            KBembedding = KBweight.new_zeros(meeting_KB.size(0), meeting_KB.size(-1))
-        KBweight = torch.einsum('ijk,ij->ik', back_transform, KBweight)
-        return KBembedding, KBweight
-    
-    def calc_ptr_loss(self, ptr_dist, model_dist, ptr_gen, ptr_gen_mask,
-                      targets, ignore_idx=-100, reduction_str='none'):
-        ptr_gen = ptr_gen.squeeze(-1).masked_fill(ptr_gen_mask.bool(), 0).reshape(-1, 1) # [batch_size * seq_len, 1]
-        # the gap to 1 is the prob for <unk>, which indicates not in the KB
-        ptr_gen_complement = (ptr_dist[:,:,-1].reshape(targets.size(0), -1)) * ptr_gen # [batch_size * seq_len, 1]
-        # print((ptr_dist[:,:,:-1].reshape(targets.size(0), -1) * ptr_gen).sum(-1).max())
-        p_final = ptr_dist[:,:,:-1].reshape(targets.size(0), -1) * ptr_gen + model_dist * (1 - ptr_gen + ptr_gen_complement) # [batch_size * seq_len, vocab_size]
-        p_loss = F.nll_loss(torch.log(p_final+1e-9), targets,
-                            ignore_index=ignore_idx, reduction=reduction_str)
-        p_loss = p_loss.sum() / (p_loss != 0).sum()
-        return p_loss, p_final
 
     def embed_audio(self, mel: torch.Tensor):
         return self.encoder(mel)
@@ -529,54 +416,11 @@ class Whisper(nn.Module):
     def logits(self, tokens: torch.Tensor, audio_features: torch.Tensor):
         return self.decoder(tokens, audio_features)
 
-    def forward(self, mel, targets, lextrees, sotlen) -> Dict[str, torch.Tensor]:
-        # 編碼器處理音頻
-        encoder_out = self.encoder(mel)
+    def forward(
+        self, mel: torch.Tensor, tokens: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        return self.decoder(tokens, self.encoder(mel))
 
-        # 解碼器獲取 logits 和 hidden states
-        logits, hidden = self.decoder.get_states(targets, encoder_out)
-
-        if self.biasing :
-
-            # 初始化變量
-            hptrs = []
-            tcpgen_dists = []
-            p_gen_masks = []
-            trees = lextrees
-            query = self.Bdrop(self.Qproj(hidden))  # [batch_size, seq_len, attndim]
-
-            for i in range(query.size(1)):
-                yseq = targets[:, i]
-                step_mask, step_embs, trees, p_gen_mask, back_transform, index_list = self.get_step_biasing_embs_prefix(
-                    yseq, trees, lextrees)
-                hptr, tcpgen_dist = self.get_meetingKB_emb_map(
-                    query[:, i], step_mask, back_transform, index_list)
-                hptrs.append(hptr)
-                tcpgen_dists.append(tcpgen_dist)
-                p_gen_masks.append(p_gen_mask)
-
-            Hptr = torch.stack(hptrs, dim=1)  # [batch_size, seq_len, attndim]
-            tcpgen_dist = torch.stack(tcpgen_dists, dim=1)  # [batch_size, seq_len, vocab_size]
-            gen_prob = torch.sigmoid(self.pointer_gate(torch.cat([Hptr, hidden], dim=-1)))
-            p_gen_masks = torch.tensor(p_gen_masks).to(query.device).byte().t()
-
-            model_dist = torch.softmax(logits[:, sotlen-1:-1], dim=-1)  # 調整索引以匹配序列長度
-            model_dist = model_dist.view(-1, model_dist.size(-1))
-
-            loss, output = self.calc_ptr_loss(
-                tcpgen_dist[:, sotlen-1:-1], # [batch_size, seq_len - sotlen, vocab_size + 1]
-                model_dist,
-                gen_prob[:, sotlen-1:-1], # [batch_size, seq_len, 1]
-                p_gen_masks[:, sotlen-1:-1], # # [batch_size, seq_len, 1]
-                targets[:, sotlen:].reshape(-1), # [batch_size * (seq_len - sotlen)]
-            )
-        else:
-            # 不使用偏置的情況
-            output = torch.log_softmax(logits[:, sotlen-1:-1], dim=-1)
-            loss = F.nll_loss(output.view(-1, output.size(-1)), targets[:, sotlen:].reshape(-1))
-
-        return loss, output
-    
     @property
     def device(self):
         return next(self.parameters()).device
@@ -625,25 +469,3 @@ class Whisper(nn.Module):
     detect_language = detect_language_function
     transcribe = transcribe_function
     decode = decode_function
-
-def lecun_normal_init_parameters(module):
-    """Initialize parameters in the LeCun's manner."""
-    for p in module.parameters():
-        data = p.data
-        if data.dim() == 1:
-            # bias
-            data.zero_()
-        elif data.dim() == 2:
-            # linear weight
-            n = data.size(1)
-            stdv = 1.0 / math.sqrt(n)
-            data.normal_(0, stdv)
-        elif data.dim() in (3, 4):
-            # conv weight
-            n = data.size(1)
-            for k in data.size()[2:]:
-                n *= k
-            stdv = 1.0 / math.sqrt(n)
-            data.normal_(0, stdv)
-        else:
-            raise NotImplementedError

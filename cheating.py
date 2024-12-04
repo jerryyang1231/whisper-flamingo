@@ -31,14 +31,14 @@ from utils import (
 from utils_biasing import BiasingProcessor_taigi
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 import json
 
 # my command
-# python -u biasing.py config/audio-text/at_taigi_small_biasing.yaml
+# python -u cheating.py config/audio-text/at_taigi_small_cheating.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -93,8 +93,9 @@ class YTTDTaigiTRSDataset(Dataset):
 
         text = self.text_normalizer(text)
         text = text.replace(" ", "")
-        
+
         all_keywords = get_all_keywords(mandarin_text, self.dictionary)
+        filtered_keywords = [word for word in all_keywords if word in text]
         
         # 將關鍵詞轉換為 biasing_list
         biasing_list = []
@@ -369,7 +370,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-biasing",
             config=cfg,
-            name="whisper-biasing taigi small "
+            name="whisper-biasing taigi small cheating"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -420,7 +421,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

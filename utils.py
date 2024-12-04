@@ -333,13 +333,14 @@ class WhisperDataCollatorWhithPadding_librispeech:
 
 class WhisperDataCollatorWhithPadding_taigi:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, wav_lens = [], [], [], []
+        input_ids, labels, dec_input_ids, wav_lens, prompt_lens = [], [], [], [], []
 
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
             wav_lens.append(f["wav_lens"])
+            prompt_lens.append(f["prompt_lens"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
@@ -360,7 +361,8 @@ class WhisperDataCollatorWhithPadding_taigi:
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "wav_lens": wav_lens,  # Add wav_lens to the batch
+            "wav_lens": wav_lens, 
+            "prompt_lens": prompt_lens,
         }
 
         batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
@@ -581,12 +583,10 @@ class WhisperTextCollatorWhithPadding_taigi_cls:
 
 class WhisperTextCollatorWhithPadding_taigi_biasing:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, biasing_list, wav_lens, targets =[], [], [], [], [], []
+        input_ids, biasing_list, wav_lens, targets =[], [], [], []
         
         for f in features:
             input_ids.append(f["input_ids"])
-            labels.append(f["labels"])
-            dec_input_ids.append(f["dec_input_ids"])
             biasing_list.append(f["biasing_list"])
             wav_lens.append(f["wav_lens"])
             targets.append(f["targets"])         
@@ -596,31 +596,57 @@ class WhisperTextCollatorWhithPadding_taigi_biasing:
         input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant',
                             constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
 
-        label_lengths = [len(lab) for lab in labels]
-        dec_input_ids_length = [len(e) for e in dec_input_ids]
         target_lengths = [len(t) for t in targets]
-        max_label_len = max(label_lengths + dec_input_ids_length + target_lengths)
+        max_target_len = max(target_lengths)
 
-        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
-        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
-                  for lab, lab_len in zip(labels, label_lengths)]
-        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
-                         for e, e_len in zip(dec_input_ids, dec_input_ids_length)]     
-        targets = [np.pad(t, (0, max_label_len - t_len), 'constant', constant_values=-100) 
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot 
+        targets = [np.pad(t, (0, max_target_len - t_len), 'constant', constant_values=-100) 
            for t, t_len in zip(targets, target_lengths)]
    
 
         batch = {
             "input_ids": input_ids,
-            "labels": labels,
-            "dec_input_ids": dec_input_ids,
             "biasing_list": biasing_list,
             "wav_lens": wav_lens,
             "targets": targets,
         }
         
         # 只將數值類型的項目轉換為張量
-        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "targets"]:
+        for key in ["input_ids", "wav_lens", "targets"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
+    
+class WhisperDataCollatorWhithPadding_taigi_no_biasing:
+    def __call__(self, features):
+        input_ids, targets, wav_lens,  =[], [], [], 
+        
+        for f in features:
+            input_ids.append(f["input_ids"])
+            wav_lens.append(f["wav_lens"])
+            targets.append(f["targets"])         
+        
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant',
+                            constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+
+        target_lengths = [len(t) for t in targets]
+        max_target_len = max(target_lengths)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot     
+        targets = [np.pad(t, (0, max_target_len - t_len), 'constant', constant_values=-100) 
+           for t, t_len in zip(targets, target_lengths)]
+   
+
+        batch = {
+            "input_ids": input_ids,
+            "wav_lens": wav_lens,
+            "targets": targets,
+        }
+        
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "wav_lens", "targets"]:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
 
         return batch
