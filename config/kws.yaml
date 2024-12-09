@@ -13,8 +13,8 @@ whisper_size: small
 lr_classifier: 1.0e-4
 lr_text: 1.0e-4
 batch_size: 4
-num_train_steps: 180000
-warmup_steps: 30000
+num_train_steps: 360000
+warmup_steps: 60000
 gradient_accumulation_steps: 1
 
 monitor: 'val/acc'  

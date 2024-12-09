@@ -28,7 +28,7 @@ from utils import (
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
-# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 import json
@@ -265,8 +265,8 @@ class AdaKWSModel(LightningModule):
             z = self.kw_module1(audio_features, mu_k, sigma_k)
             z = self.kw_module2(z, mu_k, sigma_k)
 
-            # 平均 pooling
-            z_pooled = z.mean(dim=1) # [B,D]
+            # max pooling
+            z_pooled, _ = z.max(dim=1)  # [B,D]
 
             # 分類器
             logit = self.classifier(z_pooled) # [B,2]
@@ -453,7 +453,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
         
     # End the WandB run
     wandb.finish()
