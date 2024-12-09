@@ -342,28 +342,48 @@ class WhisperTextModule(LightningModule):
         # out_at = self.model.decoder(dec_input_ids, audio_features, xt_1=keyword_representations)
 
         labels[labels == -100] = self.tokenizer.eot
-
+        # print("labels :", labels)
+        # print("labels.shape :", labels.shape)
         mod_list = {"at": out_at}
         for mod, out in mod_list.items():         
             loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
             # remove all decoder predictions after first eot for proper decoding
             tokens = torch.argmax(out, dim=2)
-
+            # print("tokens :", tokens)
+            # print("tokens.shape :", tokens.shape)
+            # input("key")
             # Set all decoder predictions after first eot to eot
             # TODO: fix for large-v3, which predicts <eot> in the beginning
             eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-                        
+
+            # # 針對每個序列進行檢查
+            # for i in range(eot_find.shape[0]):
+            #     if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
+            #         first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
+            #         tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+
+            # # calculate next token prediction, not include lang tag, task, and no timestamps token
+            # mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
+            # n_correct = torch.sum(
+            #     tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
+            # )
+            
             # 針對每個序列進行檢查
             for i in range(eot_find.shape[0]):
-                if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
-                    first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
-                    tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+                # 找出所有 eot 的位置
+                eot_positions = (tokens[i] == self.tokenizer.eot).nonzero(as_tuple=False)
+                
+                if eot_positions.numel() > 4:  # 確保有至少 5 個 eot
+                    # 從第 5 個 eot 開始，將後續 token 設置為 eot
+                    fourth_eot = eot_positions[1].item()  # 第 5 個 eot 的索引
+                    tokens[i, fourth_eot + 4:] = self.tokenizer.eot
 
-            # calculate next token prediction, not include lang tag, task, and no timestamps token
-            mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
+            # 計算準確率，忽略 -100 的位置
+            mask = (labels != -100) & (labels != self.tokenizer.eot)
             n_correct = torch.sum(
-                tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
+                tokens.masked_select(mask).eq(labels.masked_select(mask))
             )
+            
             total = torch.sum(mask)
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0

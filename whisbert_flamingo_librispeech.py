@@ -35,7 +35,7 @@ from transformers import BertTokenizer, BertModel
 
 # my command
 # python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_small_bert.yaml
-# CUDA_VISIBLE_DEVICES=1 python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-deu_small_bert.yaml
+# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-deu_small_bert.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407

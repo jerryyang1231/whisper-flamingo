@@ -207,6 +207,9 @@ class WhisperTextModule(LightningModule):
         biasing_list = batch["biasing_list"]  
         targets = batch["targets"].long()
 
+        # print("targets :", targets)
+        # print("biasing_list :", biasing_list)
+        # input("key")
         # 對每個樣本分別構造 lextree
         lextrees = []
         for blist in biasing_list:

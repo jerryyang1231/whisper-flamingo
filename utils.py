@@ -368,6 +368,64 @@ class WhisperDataCollatorWhithPadding_taigi:
         batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
 
         return batch
+    
+class AdaKWSDataCollatorWhithPadding:
+    def __call__(self, features):
+        input_ids, keyword_tokens, labels, wav_lens, all_keywords = [], [], [], [], []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            keyword_tokens.append(f["keyword_tokens"]) # List of lists: each keyword has its own token list
+            labels.append(f["labels"])
+            wav_lens.append(f["wav_lens"])
+            all_keywords.append(f["all_keywords"])
+
+        # 1. 音訊數據填充
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        padded_input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 
+                                   'constant', constant_values=0)
+                            for audio, audio_len in zip(input_ids, audio_lengths)]
+        
+        # 2. 處理 keyword_tokens
+        # (a) 取得該 batch 中每個樣本最多的關鍵字數量
+        max_keywords_per_sample = max(len(sample) for sample in keyword_tokens)
+        # (b) 取得整個 batch 中所有關鍵字中最長 token 長度
+        max_keyword_token_len = max(
+            max(len(kt) for kt in sample) 
+            for sample in keyword_tokens
+        )
+        padded_keyword_tokens = []
+        for sample in keyword_tokens:
+            padded_keywords = [
+                np.pad(kt, (0, max_keyword_token_len - len(kt)), 
+                       'constant', constant_values=50257) 
+                for kt in sample
+            ]
+            # 若該 sample 的關鍵字數量少於 max_keywords_per_sample，進行填充
+            while len(padded_keywords) < max_keywords_per_sample:
+                padded_keywords.append(
+                    np.full((max_keyword_token_len,), 50257)
+                )
+            padded_keyword_tokens.append(padded_keywords) # shape: [batch_size, max_keywords_per_sample, max_keyword_token_len]
+
+        # 3. 處理標籤
+        padded_labels = [label + [False]*(max_keywords_per_sample - len(label)) for label in labels] # shape: [batch_size, max_keywords_per_sample]
+
+        
+        batch = {
+            "input_ids": padded_input_ids,
+            "keyword_tokens": padded_keyword_tokens,
+            "labels": padded_labels,
+            "wav_lens": wav_lens, 
+            "all_keywords": all_keywords,
+        }
+
+        # 4. 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "keyword_tokens", "labels", "wav_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
 
 class WhisperDataCollatorWhithPadding_fleurs:
     def __call__(self, features):
@@ -864,6 +922,65 @@ def whisper_optimizer(model, cfg, t_total, video=True):
     )
     return optimizer, scheduler
 
+def AdaKWS_optimizer(model, cfg, t_total):
+    # 定義哪些參數不做 weight_decay
+    no_decay = ["bias", "LayerNorm.weight"]
+
+    # phi_params: text_encoder 的參數 (φ)
+    phi_params = list(model.text_encoder.named_parameters())
+
+    # theta_params: kw_module1, kw_module2, classifier 的參數 (θ)
+    theta_params = list(model.kw_module1.named_parameters()) + \
+                   list(model.kw_module2.named_parameters()) + \
+                   list(model.classifier.named_parameters())
+
+    # 對 phi_params 分 decay/no_decay
+    phi_decay = [p for n, p in phi_params if not any(nd in n for nd in no_decay)]
+    phi_no_decay = [p for n, p in phi_params if any(nd in n for nd in no_decay)]
+
+    # 對 theta_params 分 decay/no_decay
+    theta_decay = [p for n, p in theta_params if not any(nd in n for nd in no_decay)]
+    theta_no_decay = [p for n, p in theta_params if any(nd in n for nd in no_decay)]
+
+    # 建立 optimizer group
+    # 這裡根據論文或需求，phi_params 用 cfg.lr_text，theta_params 用 cfg.lr_classifier
+    optimizer_grouped_parameters = [
+        {
+            "params": theta_decay,
+            "lr": cfg.lr_classifier,
+            "weight_decay": cfg.weight_decay
+        },
+        {
+            "params": theta_no_decay,
+            "lr": cfg.lr_classifier,
+            "weight_decay": 0.0
+        },
+        {
+            "params": phi_decay,
+            "lr": cfg.lr_text,
+            "weight_decay": cfg.weight_decay
+        },
+        {
+            "params": phi_no_decay,
+            "lr": cfg.lr_text,
+            "weight_decay": 0.0
+        }
+    ]
+
+    # 建立 AdamW 優化器
+    optimizer = AdamW(optimizer_grouped_parameters,
+                      lr=cfg.lr_classifier,  # 主 LR 可視為 theta 的 default
+                      eps=cfg.adam_epsilon)
+
+    # 建立 linear scheduler with warmup
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=cfg.warmup_steps,
+        num_training_steps=t_total
+    )
+
+    return optimizer, scheduler
+
 def whisper_video_projection_optimizer(model, cfg, t_total):
     if cfg.video_projection_linear_scale != 1.0:
         print("Scaling video projection scaler by {}".format(cfg.video_projection_linear_scale))
@@ -1045,6 +1162,23 @@ def setup_logging_and_checkpoint_taigi(log_output_dir, check_output_dir, train_n
                      LearningRateMonitor(logging_interval="step")]
     return tflogger, checkpoint_callback, callback_list
 
+def setup_checkpoint_kws(log_output_dir, check_output_dir, train_name, train_id, monitor, filename):
+    Path(log_output_dir).mkdir(exist_ok=True)
+    Path(check_output_dir).mkdir(exist_ok=True)
+   
+    val_checkpoint = ModelCheckpoint(
+        dirpath=f"{check_output_dir}/{train_id}",
+        filename=filename,
+        monitor=monitor,
+        mode='min',
+        save_top_k=3,
+        auto_insert_metric_name=False,
+    )
+
+    callback_list = [val_checkpoint,
+                     LearningRateMonitor(logging_interval="step")]
+    return callback_list
+
 def setup_logging_and_checkpoint_librispeech(log_output_dir, check_output_dir, train_name, train_id, monitor, filename):
     Path(log_output_dir).mkdir(exist_ok=True)
     Path(check_output_dir).mkdir(exist_ok=True)
@@ -1167,106 +1301,6 @@ class DatasetFromSampler(Dataset):
             int: length of the dataset
         """
         return len(self.sampler)
-
-import os
-import librosa
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-def load_librispeech_data(audio_max_length, text_max_length, 
-                          librispeech_root="/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech",
-                          include_audio_lens=False, reduce_val=None, max_workers=16):
-    """
-    加載 LibriSpeech 數據集，返回音頻和文本的配對列表。
-    """
-    # 修改此處，使其包含四個鍵
-    audio_transcript_pair_list = {
-        'train': [], 
-        'dev-clean': [], 
-        'dev-other': [], 
-        'test-clean': [], 
-        'test-other': []
-    }
-    
-    # 調整 splits 字典以映射到新鍵
-    splits = {
-        'train-clean-100': 'train',
-        'train-clean-360': 'train',
-        'train-other-500': 'train',
-        'dev-clean': 'dev-clean',
-        'dev-other': 'dev-other',
-        'test-clean': 'test-clean',
-        'test-other': 'test-other'
-    }
-
-    for split, split_name in splits.items():
-        split_path = os.path.join(librispeech_root, split)
-        print(f"Processing split: {split}...")
-        
-        if not os.path.exists(split_path) or not os.path.isdir(split_path):
-            print(f"Skip non-existing or non-directory path: {split_path}")
-            continue
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for speaker_dir in os.listdir(split_path):
-                speaker_path = os.path.join(split_path, speaker_dir)
-                if not os.path.isdir(speaker_path):
-                    continue
-                
-                for chapter_dir in os.listdir(speaker_path):
-                    chapter_path = os.path.join(speaker_path, chapter_dir)
-                    if not os.path.isdir(chapter_path):
-                        continue
-                    
-                    transcript_file = os.path.join(chapter_path, f"{speaker_dir}-{chapter_dir}.trans.txt")
-                    if not os.path.exists(transcript_file):
-                        print(f"Missing transcript file: {transcript_file}")
-                        continue
-
-                    transcripts = {}
-                    with open(transcript_file, 'r') as file:
-                        for line in file:
-                            parts = line.strip().split(maxsplit=1)
-                            if len(parts) == 2:
-                                file_id, transcription = parts
-                                transcripts[file_id] = transcription
-
-                    for audio_file in os.listdir(chapter_path):
-                        if audio_file.endswith('.flac'):
-                            futures.append(executor.submit(process_audio_file, audio_file, chapter_path, transcripts, text_max_length, audio_max_length, include_audio_lens))
-                
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    audio_transcript_pair_list[split_name].append(result)
-            
-        # Optionally reduce the size of the validation set
-        if split_name.startswith('dev') and reduce_val is not None:
-            audio_transcript_pair_list[split_name] = audio_transcript_pair_list[split_name][:reduce_val]
-        
-        print(f"{split_name.capitalize()} set: {len(audio_transcript_pair_list[split_name])} samples loaded.")
-    
-    return audio_transcript_pair_list
-
-def process_audio_file(audio_file, chapter_path, transcripts, text_max_length, audio_max_length, include_audio_lens):
-    file_id = audio_file.split('.')[0]
-    audio_path = os.path.join(chapter_path, audio_file)
-    text = transcripts.get(file_id, '')
-    
-    if text_max_length is not None and len(text) > text_max_length:
-        return None
-
-    try:
-        wav_data, sample_rate = librosa.load(audio_path, sr=16000)
-        audio_length = len(wav_data)
-    except Exception as e:
-        print(f"Error loading audio {audio_path}: {e}")
-        return None
-    
-    if audio_length > audio_max_length:
-        return None
-
-    return (audio_path, text, audio_length) if include_audio_lens else (audio_path, text)
 
 def get_all_keywords(mandarin_text, dictionary):
     # 句子斷詞

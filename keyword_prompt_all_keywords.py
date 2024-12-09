@@ -16,23 +16,26 @@ from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (
+    load_wave,
     add_noise,
-    WhisperDataCollatorWhithPadding_taigi_no_biasing,
+    WhisperDataCollatorWhithPadding_taigi,
     whisper_optimizer,
     setup_logging_and_checkpoint_taigi,
     wer_cer,
     DistributedSamplerWrapper,
+    get_all_keywords,
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+from transformers import BertModel, BertTokenizer
 import json
 
 # my command
-# python -u no_biasing.py config/audio-text/at_taigi_small_without_biasing.yaml
+# python -u keyword_prompt_all_keywords.py config/audio-text/at_taigi_small_keyword_prompt_all_keywords.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -44,7 +47,7 @@ valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw',
 
 class YTTDTaigiTRSDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
-                 spec_augment, noise_prob=0, noise_fn=None) -> None:
+                 spec_augment, dictionary, noise_prob=0, noise_fn=None) -> None:
         super().__init__()
         
         # 使用 Hugging Face datasets API 加載資料，並進行切分
@@ -70,6 +73,7 @@ class YTTDTaigiTRSDataset(Dataset):
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
+        self.dictionary = dictionary 
 
     def __len__(self):
         return len(self.dataset)
@@ -77,14 +81,18 @@ class YTTDTaigiTRSDataset(Dataset):
     def __getitem__(self, id):
         lang = cfg.lang
         item = self.dataset[id]
-        
-        # 獲取音頻數據和文本
+
         wav_data = item['audio']['array']
         text = item['text']
+        mandarin_text = item['text_mandarin']
         wav_lens = len(wav_data)
 
         text = self.text_normalizer(text)
         text = text.replace(" ", "")
+
+        all_keywords = get_all_keywords(mandarin_text, self.dictionary)
+        all_keywords = [self.text_normalizer(word).replace(" ", "") for word in all_keywords]
+        filtered_keywords = [word for word in all_keywords if word in text]
         
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
@@ -105,26 +113,35 @@ class YTTDTaigiTRSDataset(Dataset):
                 mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
             else:
                 raise NotImplementedError 
+        
+        prompt_ids = [self.tokenizer.sot_prev] + \
+                        self.tokenizer.encode(" " + " ".join(all_keywords)) 
+        
+        prompt_lens = len(prompt_ids)
 
-        targets = [self.tokenizer.sot, 
-                    self.tokenizer.special_tokens["<|{}|>".format(lang)],
-                    self.tokenizer.transcribe, 
-                    self.tokenizer.no_timestamps] + \
-                    self.tokenizer.encode(" " + text) + \
-                    [self.tokenizer.eot]
+        dec_input_ids = prompt_ids + \
+                        [self.tokenizer.sot, 
+                        self.tokenizer.special_tokens["<|{}|>".format(lang)],
+                        self.tokenizer.transcribe, 
+                        self.tokenizer.no_timestamps] + \
+                        self.tokenizer.encode(" " + text)
+
+        labels = dec_input_ids[1:] + [self.tokenizer.eot]
+        labels[:prompt_lens - 1] = [-100] * (prompt_lens - 1)
         
         return {
             "input_ids": mel,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
             "wav_lens": wav_lens,
-            "targets": targets,
+            "prompt_lens": prompt_lens,
         }
 
-class WhisperModelModule(LightningModule):
+class WhisperTextModule(LightningModule):
     def __init__(self, cfg, model_name, lang) -> None:
         super().__init__()
         self.model_name = model_name
         print("Loading Whisper model and weights")
-        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
         self.model = whisper.load_model(model_name,
                                         device='cpu', # avoid OOM on gpu 0 for distributed
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
@@ -134,10 +151,25 @@ class WhisperModelModule(LightningModule):
                                         add_resnet= cfg.add_resnet,
                                         num_resnet_layer=cfg.num_resnet_layer,
                                         mode = cfg.mode,
-                                        biasing = cfg.biasing,  # 開啟偏置處理
-                                        tokenizer = self.tokenizer,  # 傳入 tokenizer
+                                        sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         )
         
+        if cfg.pt_ckpt != '': # load audio-only FT ckpt
+            checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
+            state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
+            state_dict = state_dict['state_dict']
+            state_dict_updated = {k[6:]: v  for k, v in state_dict.items()} # remove 'model.'
+            # print(state_dict_updated.keys())
+            try:
+                self.model.load_state_dict(state_dict_updated) 
+            except BaseException as e: 
+                # print(str(e))
+                print("Loading weights with strict=False")
+                self.model.load_state_dict(state_dict_updated, strict=False) 
+                
+        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+
         self.cfg = cfg        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
@@ -149,13 +181,18 @@ class WhisperModelModule(LightningModule):
     def training_step(self, batch, batch_id):
         
         input_ids = batch["input_ids"]
-        targets = batch["targets"].long()
+        labels = batch["labels"].long()
+        dec_input_ids = batch["dec_input_ids"].long()
         
-        targetmask = targets != -100
-        targets = targets * targetmask
+        if self.cfg.prompt != 0: # freeze whisper encoder gradients for prompt
+            for p in self.model.encoder.parameters():
+                p.requires_grad = False
 
-        loss, _ = self.model.forward(input_ids, targets, sotlen)
+        audio_features = self.model.encoder(input_ids, training=True)
+
+        out = self.model.decoder(dec_input_ids, audio_features)
         
+        loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
         
         return loss
@@ -163,77 +200,105 @@ class WhisperModelModule(LightningModule):
     def validation_step(self, batch, batch_id, dataloader_idx=None):
         
         input_ids = batch["input_ids"]
-        targets = batch["targets"].long()
+        labels = batch["labels"].long()
+        dec_input_ids = batch["dec_input_ids"].long()
+        prompt_lens = batch["prompt_lens"]
+
+        audio_features = self.model.encoder(input_ids)
         
-        targetmask = targets != -100
-        targets = targets * targetmask
-
-        loss, output = self.model.forward(input_ids, targets, sotlen)
-
-        targets = targets[:, sotlen:]
+        out_at = self.model.decoder(dec_input_ids, audio_features)
         
-        output = output.view(targets.size(0), targets.size(1), -1).max(dim=-1)[1]
+        # labels[labels == -100] = self.tokenizer.eot
 
-        # remove all decoder predictions after first eot for proper decoding
-        tokens = output
-        # Set all decoder predictions after first eot to eot
-        # TODO: fix for large-v3, which predicts <eot> in the beginning
-        eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-                    
-        # 針對每個序列進行檢查
-        for i in range(eot_find.shape[0]):
-            if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
-                first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
-                tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+        mod_list = {"at": out_at}
+        for mod, out in mod_list.items():         
+            # 計算損失，損失函數會自動忽略 -100 的位置
+            loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
 
-        # calculate next token prediction, not include lang tag, task, and no timestamps token
-        mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
-        n_correct = torch.sum(
-            tokens[:, 3:].masked_select(mask).eq(targets[:, 3:].masked_select(mask))
-        )
-        total = torch.sum(mask)
-        acc = n_correct.item() / (total.item() + 1e-6)
-        acc = acc if acc < 1 else 0
-                        
-        o_list, l_list = [], []
-        for o, l in zip(tokens, targets):
-            # 解碼並過濾掉特殊標籤
-            decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
-            decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
+            # remove all decoder predictions after first eot for proper decoding
+            tokens = torch.argmax(out, dim=2)
             
-            # 正規化文本並移除空格
-            normalized_o = self.text_normalizer(decoded_o).replace(" ", "")
-            normalized_l = self.text_normalizer(decoded_l).replace(" ", "")
+            # Set all decoder predictions after first eot to eot
+            # TODO: fix for large-v3, which predicts <eot> in the beginning
+            eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
+            
+            # print("original tokens :", tokens)
+            # print("original tokens shape:", tokens.shape)
+            
+            # 針對每個序列進行檢查
+            for i in range(eot_find.shape[0]):
+                # 找出所有 eot 的位置
+                eot_positions = (tokens[i] == self.tokenizer.eot).nonzero(as_tuple=False)
+                
+                if eot_positions.numel() > 8:  # 確保有至少 9 個 eot
+                    # 從第 9 個 eot 開始，將後續 token 設置為 eot
+                    start_eot = eot_positions[8].item()  # 第 9 個 eot 的索引
+                    tokens[i, start_eot + 1:] = self.tokenizer.eot
 
-            # 將正規化的結果添加到列表中
-            o_list.append(normalized_o)
-            l_list.append(normalized_l)
-        
-        wer, cer = wer_cer(hypo=o_list, ref=l_list)
+            # print("tokens after processing:", tokens)
+            # print("tokens after processing shape:", tokens.shape)
 
-        for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
-            print("="*100)
-            print("PRED: {}".format(hypo))
-            print("REF:  {}".format(ref))
-            if i == 1: break
+            # 計算準確率，忽略 -100 的位置
+            mask = (labels != -100) & (labels != self.tokenizer.eot)
+            n_correct = torch.sum(
+                tokens.masked_select(mask).eq(labels.masked_select(mask))
+            )
+            
+            total = torch.sum(mask)
+            acc = n_correct.item() / (total.item() + 1e-6)
+            acc = acc if acc < 1 else 0
+
+            # 計算 WER 和 CER
+            o_list, l_list = [], []
+            for idx, (o, l, prompt_len) in enumerate(zip(tokens, labels, prompt_lens)):
+                prompt_len = prompt_len.item() 
+                
+                # 排除 prompt_ids 部分
+                o = o[prompt_len:]  
+                # print("tokens after remove prompt:", o)
+                # print("tokens after remove prompt shape:", o.shape)
+                
+                # 過濾掉特殊標籤和忽略的標籤
+                o_filtered = [t for t in o if t.item() not in self.special_token_set]
+                # print("o_filtered :", o_filtered)
+                l_filtered = [t for t in l if t.item() not in self.special_token_set and t.item() != -100]
+                
+                # 解碼
+                decoded_o = self.tokenizer.decode(o_filtered)
+                # print("decoded_o :", decoded_o)
+                decoded_l = self.tokenizer.decode(l_filtered)
+                
+                # 正規化文本並移除空格
+                normalized_o = self.text_normalizer(decoded_o).replace(" ", "")
+                # print("normalized_o :", normalized_o)
+                # input("key")
+                normalized_l = self.text_normalizer(decoded_l).replace(" ", "")
+
+                # 將正規化的結果添加到列表中
+                o_list.append(normalized_o)
+                l_list.append(normalized_l)
+            
+            wer, cer = wer_cer(hypo=o_list, ref=l_list)
+
+            print("Mod: {}".format(mod))
+            for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
+                print("="*100)
+                print("PRED: {}".format(hypo))
+                print("REF:  {}".format(ref))
+                if i == 1: break
+            
+            log_prefix = {0: 'val', 1: 'test'}
+            self.log("{}/loss_{}".format(log_prefix[dataloader_idx], mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+            self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+            self.log("{}/wer_{}".format(log_prefix[dataloader_idx], mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+            self.log("{}/acc_{}".format(log_prefix[dataloader_idx], mod), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         
-        log_prefix = {0: 'val', 1: 'test'}
-        self.log("{}/loss".format(log_prefix[dataloader_idx]), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("{}/cer".format(log_prefix[dataloader_idx]), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("{}/wer".format(log_prefix[dataloader_idx]), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("{}/acc".format(log_prefix[dataloader_idx]), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        
-        return {
-            "cer": cer,
-            "wer": wer,
-            "loss": loss
-        }
+        return
        
     def configure_optimizers(self):
         model = self.model
-        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)
+        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)        
         self.optimizer, self.scheduler = optimizer, scheduler
-
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
     def setup(self, stage=None):
@@ -247,6 +312,7 @@ class WhisperModelModule(LightningModule):
                                       self.model_name,
                                       max_length=self.cfg.audio_max_length,
                                       spec_augment=self.cfg.spec_augment,
+                                      dictionary=dictionary,
                                       noise_prob=cfg.noise_prob)  
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -260,7 +326,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi_no_biasing())
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -269,6 +335,7 @@ class WhisperModelModule(LightningModule):
                                     self.model_name,
                                     max_length=self.cfg.audio_max_length,
                                     spec_augment=False,
+                                    dictionary=dictionary,
                                     noise_prob=0)               
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -279,7 +346,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi_no_biasing())
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -288,6 +355,7 @@ class WhisperModelModule(LightningModule):
                                     self.model_name,
                                     max_length=self.cfg.audio_max_length,
                                     spec_augment=False,
+                                    dictionary=dictionary,
                                     noise_prob=0)                                
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -298,8 +366,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi_no_biasing())
-
+                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -310,10 +377,14 @@ if __name__ == "__main__":
     print(cfg)
     print("audio max length: {}".format(cfg.audio_max_length))
 
+    # 讀取您的 JSON 華台辭典
+    with open('mandarin2taibun.json', 'r', encoding='utf-8') as f:
+        dictionary = json.load(f)
+
     # Initialize WandB
-    wandb.init(project="whisper-biasing",
+    wandb.init(project="KG-whisper",
             config=cfg,
-            name="whisper-biasing taigi small without biasing"
+            name="whisper taigi small keyword prompt"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -323,15 +394,7 @@ if __name__ == "__main__":
                                                                                     cfg.monitor,
                                                                                     cfg.filename)
         
-    model = WhisperModelModule(cfg, cfg.model_name, cfg.lang)
-
-    # options = whisper.DecodingOptions(language="zh", fp16=False, without_timestamps=True)
-    # tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language="zh")
-    # decodetask = whisper.decoding.DecodingTask(model, options)
-    # logit_filters = decodetask.logit_filters
-    # sot_sequence = decodetask.sot_sequence
-    # sotlen = len(sot_sequence)
-    sotlen = 4
+    model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
@@ -354,17 +417,17 @@ if __name__ == "__main__":
         reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
         # gradient_clip_val=1, # TODO: add as config variable?
         use_distributed_sampler=False, # implemented custom distributed trainer
-        # sync_batchnorm=True,
+        sync_batchnorm=True,
     )
 
     # TODO: save config file tp the checkpoint dir, also for pre-trained model
     print(cfg)
-    resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"    
+    resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

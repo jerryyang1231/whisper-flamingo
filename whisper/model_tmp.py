@@ -14,7 +14,6 @@ from .decoding import detect_language as detect_language_function
 from .transcribe import transcribe as transcribe_function
 
 from transformers import BertModel, BertTokenizer
-import math  # 添加必要的導入
 
 @dataclass
 class ModelDimensions:
@@ -158,6 +157,7 @@ class ResidualAttentionBlock(nn.Module):
     
     def apply_gated_x_attn_parallel(self, x, xt_1, xt_2):
         x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0] * self.attn_gate_1.tanh()
+        # x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0]
         x_2 = self.gated_x_attn_2(self.gated_x_attn_ln_2(x), xt_2)[0] * self.attn_gate_2.tanh()
         x = x + x_1 + x_2
         x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
@@ -193,6 +193,33 @@ class ResidualAttentionBlock(nn.Module):
         if self.cross_attn:
             x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
         x = x + self.mlp(self.mlp_ln(x))        
+        return x
+
+class ResNet1D(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers):
+        super(ResNet1D, self).__init__()
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers):
+            print(f"Add ResNet layers")
+            self.layers.append(nn.Sequential(
+                nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Conv1d(hidden_dim, input_dim, kernel_size=3, padding=1),
+                nn.BatchNorm1d(input_dim)
+            ))
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # x 形狀: (batch_size, seq_length, input_dim)
+        x = x.permute(0, 2, 1)  # 轉換為 (batch_size, input_dim, seq_length)
+        for layer in self.layers:
+            identity = x
+            out = layer(x)
+            out += identity
+            out = self.relu(out)
+            x = out
+        x = x.permute(0, 2, 1)  # 轉回 (batch_size, seq_length, input_dim)
         return x
 
 class AudioEncoder(nn.Module):
@@ -275,7 +302,11 @@ class TextDecoder(nn.Module):
             self.xt_projection = nn.Linear(bert_hidden_size, n_state)
         else:
             self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
-
+        
+        self.add_resnet = add_resnet
+        if add_resnet:
+            self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
+        
         self.mode = mode
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 

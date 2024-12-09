@@ -10,14 +10,13 @@ num_devices: 1
 precision: 16-mixed
 
 model_name: small
-learning_rate: 1.25e-5  # small
-# 之前 train baseline是開 batch_szie: 4
+learning_rate: 5.0e-5
 batch_size: 8
-num_train_steps: 80000
-warmup_steps: 8000
+num_train_steps: 180000
+warmup_steps: 30000
 gradient_accumulation_steps: 1
 
-monitor: 'val/cer'  
+monitor: 'val/cer_at'  
 noise_prob: 0.0
 noise_snr_train: 0
 
@@ -27,9 +26,8 @@ dropout_rate: 0
 lang: zh
 resume_training: False
 
-pt_ckpt: ''
-# pt_ckpt: 'whisper-biasing_taigi_small_without_biasing/step-80000-cer=0.1831-wer=0.6182.ckpt'
-train_id: whisper-biasing_taigi_small_without_biasing
+pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
+train_id: whisper_taigi_small_keyword_prompt_all_keywords
 
 prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
@@ -39,8 +37,9 @@ bert_encoder: False
 add_resnet: False
 num_resnet_layer: 0
 mode: ""
-biasing: False
+sequential_gated_x_attn: False # False for parallel flamingo
+prompt: 1 # 0 for False, 1 for True
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
-filename: "step-{step:05d}-cer={val/cer:.4f}-wer={val/wer:.4f}"
+filename: "step-{step:05d}-cer_at={val/cer_at:.4f}-wer_at={val/wer_at:.4f}"
