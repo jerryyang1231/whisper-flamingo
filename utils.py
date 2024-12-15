@@ -333,7 +333,8 @@ class WhisperDataCollatorWhithPadding_librispeech:
 
 class WhisperDataCollatorWhithPadding_taigi:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, wav_lens, prompt_lens = [], [], [], [], []
+        # input_ids, labels, dec_input_ids, wav_lens, prompt_lens, translations = [], [], [], [], [], []
+        input_ids, labels, dec_input_ids, wav_lens, prompt_lens, = [], [], [], [], []
 
         for f in features:
             input_ids.append(f["input_ids"])
@@ -341,6 +342,7 @@ class WhisperDataCollatorWhithPadding_taigi:
             dec_input_ids.append(f["dec_input_ids"])
             wav_lens.append(f["wav_lens"])
             prompt_lens.append(f["prompt_lens"])
+            # translations.append(f["translations"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
@@ -363,9 +365,12 @@ class WhisperDataCollatorWhithPadding_taigi:
             "dec_input_ids": dec_input_ids,
             "wav_lens": wav_lens, 
             "prompt_lens": prompt_lens,
+            # "translations": translations,
         }
 
-        batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "prompt_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
 
         return batch
     
@@ -1170,7 +1175,7 @@ def setup_checkpoint_kws(log_output_dir, check_output_dir, train_name, train_id,
         dirpath=f"{check_output_dir}/{train_id}",
         filename=filename,
         monitor=monitor,
-        mode='min',
+        mode='max',
         save_top_k=3,
         auto_insert_metric_name=False,
     )

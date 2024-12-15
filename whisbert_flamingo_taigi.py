@@ -27,9 +27,9 @@ from utils import (
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 
@@ -157,11 +157,6 @@ class WhisperTextModule(LightningModule):
                 self.model.load_state_dict(state_dict_updated, strict=False) 
                 
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
-
-        # if 'large' in self.model_name: # only decoder training
-        #     for p in self.model.encoder.parameters():
-        #         p.requires_grad = False
-
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
         self.cfg = cfg        
@@ -181,7 +176,7 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translations = batch["translations"]  # 保持為文本列表
+        translations = batch["translations"]
 
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs = self.bert_tokenizer(
@@ -189,7 +184,7 @@ class WhisperTextModule(LightningModule):
             return_tensors='pt',
             padding=True,
             truncation=True,
-            max_length=512  # 根據需要調整最大長度
+            max_length=512 
         ).to(self.device)
         
         # 通過 BERT 模型獲取輸出
@@ -219,7 +214,7 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translations = batch["translations"]  # 保持為文本列表
+        translations = batch["translations"]
 
         # 使用 BERT 分詞器對文本進行編碼
         bert_inputs = self.bert_tokenizer(
@@ -227,7 +222,7 @@ class WhisperTextModule(LightningModule):
             return_tensors='pt',
             padding=True,
             truncation=True,
-            max_length=512  # 根據需要調整最大長度
+            max_length=512 
         ).to(self.device)
         
         # 通過 BERT 模型獲取輸出

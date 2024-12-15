@@ -29,13 +29,13 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 import json
 
 # my command
-# python -u keyword_prompt.py config/audio-text/at_taigi_small_keyword_prompt.yaml
+# python -u keyword_prompt_plus_translation.py config/audio-text/at_taigi_small_keyword_prompt_plus_translation.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -128,12 +128,16 @@ class YTTDTaigiTRSDataset(Dataset):
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         labels[:prompt_lens - 1] = [-100] * (prompt_lens - 1)
         
+        mandarin_text = mandarin_text.replace(" ", "")
+        mandarin_text = self.text_normalizer(mandarin_text)
+        
         return {
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "wav_lens": wav_lens,
             "prompt_lens": prompt_lens,
+            "translations": mandarin_text,
         }
 
 class WhisperTextModule(LightningModule):
@@ -150,6 +154,11 @@ class WhisperTextModule(LightningModule):
                                         mode = cfg.mode,
                                         sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         )
+        
+        # freeze whisper encoder gradients for prompt
+        if cfg.prompt != 0:
+            for p in self.model.encoder.parameters():
+                p.requires_grad = False
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
@@ -170,6 +179,10 @@ class WhisperTextModule(LightningModule):
         self.cfg = cfg        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
+        
+        # 初始化 BERT 分詞器和模型
+        self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
+        self.bert_model = BertModel.from_pretrained('bert-base-chinese').to(self.device)
 
 
     def forward(self, x):
@@ -180,14 +193,24 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        
-        if self.cfg.prompt != 0: # freeze whisper encoder gradients for prompt
-            for p in self.model.encoder.parameters():
-                p.requires_grad = False
+        translations = batch["translations"]
 
+        # 使用 BERT 分詞器對文本進行編碼
+        bert_inputs = self.bert_tokenizer(
+            translations,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=512 
+        ).to(self.device)
+        
+        # 通過 BERT 模型獲取輸出
+        bert_outputs = self.bert_model(**bert_inputs)
+        translation_embeddings = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        
         audio_features = self.model.encoder(input_ids, training=True)
 
-        out = self.model.decoder(dec_input_ids, audio_features)
+        out = self.model.decoder(dec_input_ids, audio_features, xt_1=translation_embeddings)
         
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
@@ -200,10 +223,24 @@ class WhisperTextModule(LightningModule):
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
         prompt_lens = batch["prompt_lens"]
+        translations = batch["translations"]
 
+        # 使用 BERT 分詞器對文本進行編碼
+        bert_inputs = self.bert_tokenizer(
+            translations,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=512 
+        ).to(self.device)
+        
+        # 通過 BERT 模型獲取輸出
+        bert_outputs = self.bert_model(**bert_inputs)
+        translation_embeddings = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        
         audio_features = self.model.encoder(input_ids)
         
-        out_at = self.model.decoder(dec_input_ids, audio_features)
+        out_at = self.model.decoder(dec_input_ids, audio_features, xt_1=translation_embeddings)
         
         # labels[labels == -100] = self.tokenizer.eot
 
@@ -253,7 +290,6 @@ class WhisperTextModule(LightningModule):
                 
                 # 解碼
                 decoded_o = self.tokenizer.decode(o_filtered)
-                
                 decoded_l = self.tokenizer.decode(l_filtered)
                 
                 # 正規化文本並移除空格
@@ -282,9 +318,10 @@ class WhisperTextModule(LightningModule):
         return
        
     def configure_optimizers(self):
-        model = self.model
-        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)        
+        model = self.model        
+        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)        
         self.optimizer, self.scheduler = optimizer, scheduler
+        
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
     def setup(self, stage=None):
@@ -370,7 +407,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="KG-whisper",
             config=cfg,
-            name="whisper taigi small keyword prompt"
+            name="whisper taigi small keyword prompt plus translation"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -392,7 +429,6 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
         logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
@@ -413,7 +449,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

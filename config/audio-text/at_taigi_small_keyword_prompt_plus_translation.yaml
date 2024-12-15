@@ -26,16 +26,17 @@ dropout_rate: 0
 lang: zh
 resume_training: False
 
-# pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
-pt_ckpt: 'whisper_taigi_small_keyword_prompt/step-144000-cer_at=0.0818-wer_at=0.3265.ckpt'
-train_id: whisper_taigi_small_keyword_prompt
+pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
+train_id: whisper_taigi_small_keyword_prompt_plus_translation
 
-# prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
+prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 
 # text
-add_gated_x_attn: 0 # 0 for False, 1 for True
-bert_encoder: False
-mode: ""
+add_gated_x_attn: 1 # 0 for False, 1 for True
+bert_encoder: True
+add_resnet: False
+num_resnet_layer: 0
+mode: "translation"
 sequential_gated_x_attn: False # False for parallel flamingo
 prompt: 1 # 0 for False, 1 for True
 

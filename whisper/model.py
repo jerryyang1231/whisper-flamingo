@@ -311,7 +311,7 @@ class TextDecoder(nn.Module):
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
                 xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None,
-                source_embedding: Optional[Tensor] = None, value_embedding: Optional[Tensor] = None):
+        ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens

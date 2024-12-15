@@ -35,7 +35,7 @@ from transformers import BertModel, BertTokenizer
 import json
 
 # my command
-# python -u keyword_prompt.py config/audio-text/at_taigi_small_keyword_prompt.yaml
+# python -u keyword_prompt_negative.py config/audio-text/at_taigi_small_keyword_prompt_negative.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -47,7 +47,7 @@ valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw',
 
 class YTTDTaigiTRSDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
-                 spec_augment, dictionary, noise_prob=0, noise_fn=None) -> None:
+                 spec_augment, dictionary, noise_prob=0, noise_fn=None, negative_sample_ratio=0.5) -> None:
         super().__init__()
         
         # 使用 Hugging Face datasets API 加載資料，並進行切分
@@ -74,6 +74,7 @@ class YTTDTaigiTRSDataset(Dataset):
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
         self.dictionary = dictionary 
+        self.negative_sample_ratio = negative_sample_ratio
 
     def __len__(self):
         return len(self.dataset)
@@ -89,11 +90,27 @@ class YTTDTaigiTRSDataset(Dataset):
 
         text = self.text_normalizer(text)
         text = text.replace(" ", "")
-
+        # print("text :", text)
         all_keywords = get_all_keywords(mandarin_text, self.dictionary)
         all_keywords = [self.text_normalizer(word).replace(" ", "") for word in all_keywords]
+        # print("all_keywords :", all_keywords)
         filtered_keywords = [word for word in all_keywords if word in text]
+        # print("filtered_keywords :", filtered_keywords)
         
+        # 過濾負樣本：從 all_keywords 中篩選不在 text 中的詞
+        negative_keywords = [word for word in all_keywords if word not in text]
+        # print("negative_keywords :", negative_keywords)
+        # 根據比例選取負樣本
+        num_negative = int(len(filtered_keywords) * self.negative_sample_ratio)
+        negative_keywords = negative_keywords[:num_negative]
+        # print("negative_keywords :", negative_keywords)
+        
+        # 將正樣本和負樣本結合
+        combined_keywords = filtered_keywords + negative_keywords
+        # print("combined_keywords :", combined_keywords)
+        # input("key")
+        # 打亂順序
+        # np.random.shuffle(combined_keywords)
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
         else: # 加噪音
@@ -115,7 +132,7 @@ class YTTDTaigiTRSDataset(Dataset):
                 raise NotImplementedError 
         
         prompt_ids = [self.tokenizer.sot_prev] + \
-                        self.tokenizer.encode(" " + " ".join(filtered_keywords)) 
+                        self.tokenizer.encode(" " + " ".join(combined_keywords)) 
         prompt_lens = len(prompt_ids)
 
         dec_input_ids = prompt_ids + \
@@ -204,8 +221,6 @@ class WhisperTextModule(LightningModule):
         audio_features = self.model.encoder(input_ids)
         
         out_at = self.model.decoder(dec_input_ids, audio_features)
-        
-        # labels[labels == -100] = self.tokenizer.eot
 
         mod_list = {"at": out_at}
         for mod, out in mod_list.items():         
@@ -299,7 +314,8 @@ class WhisperTextModule(LightningModule):
                                       max_length=self.cfg.audio_max_length,
                                       spec_augment=self.cfg.spec_augment,
                                       dictionary=dictionary,
-                                      noise_prob=cfg.noise_prob)  
+                                      noise_prob=cfg.noise_prob,
+                                      negative_sample_ratio=cfg.negative_sample_ratio)  
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -322,7 +338,8 @@ class WhisperTextModule(LightningModule):
                                     max_length=self.cfg.audio_max_length,
                                     spec_augment=False,
                                     dictionary=dictionary,
-                                    noise_prob=0)               
+                                    noise_prob=0,
+                                    negative_sample_ratio=cfg.negative_sample_ratio)               
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -342,7 +359,8 @@ class WhisperTextModule(LightningModule):
                                     max_length=self.cfg.audio_max_length,
                                     spec_augment=False,
                                     dictionary=dictionary,
-                                    noise_prob=0)                                
+                                    noise_prob=0,
+                                    negative_sample_ratio=cfg.negative_sample_ratio)                                
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
