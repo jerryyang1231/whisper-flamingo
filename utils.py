@@ -334,14 +334,16 @@ class WhisperDataCollatorWhithPadding_librispeech:
 class WhisperDataCollatorWhithPadding_taigi:
     def __call__(self, features):
         # input_ids, labels, dec_input_ids, wav_lens, prompt_lens, translations = [], [], [], [], [], []
-        input_ids, labels, dec_input_ids, wav_lens, prompt_lens, = [], [], [], [], []
+        # input_ids, labels, dec_input_ids, wav_lens, prompt_lens, = [], [], [], [], []
+        input_ids, labels, dec_input_ids, wav_lens, keyword_tokens, = [], [], [], [], []
 
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
             wav_lens.append(f["wav_lens"])
-            prompt_lens.append(f["prompt_lens"])
+            keyword_tokens.append(f["keyword_tokens"]) # List of lists: each keyword has its own token list
+            # prompt_lens.append(f["prompt_lens"])
             # translations.append(f["translations"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
@@ -359,17 +361,40 @@ class WhisperDataCollatorWhithPadding_taigi:
         dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
                         for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
 
+        # 處理 keyword_tokens
+        # (a) 取得該 batch 中每個樣本最多的關鍵字數量
+        max_keywords_per_sample = max(len(sample) for sample in keyword_tokens)
+        # (b) 取得整個 batch 中所有關鍵字中最長 token 長度
+        max_keyword_token_len = max(
+            max(len(kt) for kt in sample) 
+            for sample in keyword_tokens
+        )
+        padded_keyword_tokens = []
+        for sample in keyword_tokens:
+            padded_keywords = [
+                np.pad(kt, (0, max_keyword_token_len - len(kt)), 
+                       'constant', constant_values=50257) 
+                for kt in sample
+            ]
+            # 若該 sample 的關鍵字數量少於 max_keywords_per_sample，進行填充
+            while len(padded_keywords) < max_keywords_per_sample:
+                padded_keywords.append(
+                    np.full((max_keyword_token_len,), 50257)
+                )
+            padded_keyword_tokens.append(padded_keywords) # shape: [batch_size, max_keywords_per_sample, max_keyword_token_len]
+
         batch = {
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "wav_lens": wav_lens, 
-            "prompt_lens": prompt_lens,
+            "keyword_tokens": padded_keyword_tokens,
+            # "prompt_lens": prompt_lens,
             # "translations": translations,
         }
 
         # 只將數值類型的項目轉換為張量
-        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "prompt_lens"]:
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "keyword_tokens"]:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
 
         return batch

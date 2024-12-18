@@ -96,6 +96,10 @@ class YTTDTaigiTRSDataset(Dataset):
         all_keywords = get_all_keywords(mandarin_text, self.dictionary)
         all_keywords = [self.text_normalizer(word).replace(" ", "") for word in all_keywords]
 
+        # 生成 `keyword_tokens`
+        # 將所有關鍵字轉換為 tokens，並使用 tokenizer 編碼
+        keyword_tokens = [self.tokenizer.encode(keyword) for keyword in all_keywords]
+
         # 生成二元 labels
         labels = [keyword in text for keyword in all_keywords]
 
@@ -110,10 +114,6 @@ class YTTDTaigiTRSDataset(Dataset):
             
         n_mels = 80 if self.whisper_size != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
-
-        # 生成 `keyword_tokens`
-        # 將所有關鍵字轉換為 tokens，並使用 tokenizer 編碼
-        keyword_tokens = [self.tokenizer.encode(keyword) for keyword in all_keywords]
         
         return {
             "input_ids": mel,
@@ -242,37 +242,46 @@ class AdaKWSModel(LightningModule):
         # Classifier head
         # 對每個 keyword 輸出二分類結果，因此維度是 d_model -> 2
         self.classifier = nn.Linear(self.text_encoder.d_model, num_classes)
-
+    
     def forward(self, audio, keyword_tokens):
-        # audio: [B, n_mels, T] (whisper encoder輸入shape)
-        # keyword_tokens: [B, K, L] K: keyword數量, L: 最長keyword長度
-        audio_features = self.whisper.encoder(audio)  # [B,T,D]
+        """
+        audio: [B, n_mels, T]  # Whisper encoder expects [batch_size, n_mels, time]
+        keyword_tokens: [B, K, L]
+          B: batch_size
+          K: 每條語音對應的keyword數量
+          L: 該batch中最長的keyword token length
+        """
+        # 1. Whisper encoder
+        audio_features = self.whisper.encoder(audio)  # [B, T, D=768]
+        B, T, D = audio_features.shape
         
-        # 對整個 batch 的關鍵字取得mu_v, sigma_v
+        # 2. Text encoder
         # mu_v, sigma_v: [B,K,D]
         mu_v, sigma_v = self.text_encoder(keyword_tokens)
+        
+        # 3. 平行處理，把[ B, T, D ]展開成[ B, K, T, D ]，再reshape成[ B*K, T, D ]
+        #   同理mu_v, sigma_v reshape成[ B*K, D ] 
+        K = mu_v.size(1)  # keyword數量
+        audio_features = audio_features.unsqueeze(1).expand(B, K, T, D) # [B,K,T,D]
+        audio_features = audio_features.contiguous().view(B*K, T, D)    # [B*K, T, D]
+       
+        mu_v = mu_v.view(B*K, D)       # [B*K, D]
+        sigma_v = sigma_v.view(B*K, D) # [B*K, D]
 
-        # 針對每個 keyword 都各自產生一組預測
-        B, K, D = mu_v.shape
-        all_logits = []
-        for k_i in range(K):
-            # 取出第k_i個keyword的mu,sigma
-            mu_k = mu_v[:, k_i, :].unsqueeze(1)     # [B,1,D]
-            sigma_k = sigma_v[:, k_i, :].unsqueeze(1) # [B,1,D]
+        # 4. 通過 KeywordAdaptiveModule (兩層)
+        z = self.kw_module1(audio_features, mu_v.unsqueeze(1), sigma_v.unsqueeze(1))  # shape [B*K,T,D]
+        z = self.kw_module2(z, mu_v.unsqueeze(1), sigma_v.unsqueeze(1))               # shape [B*K,T,D]
+        
+        # 5. Pooling
+        # z -> [B*K,D]
+        z_pooled, _ = torch.max(z, dim=1)
+        
+        # 6. Classifier
+        # logits -> [B*K,2]
+        logits_flat = self.classifier(z_pooled)
 
-            # 通過兩層KeywordAdaptiveModule
-            z = self.kw_module1(audio_features, mu_k, sigma_k)
-            z = self.kw_module2(z, mu_k, sigma_k)
-
-            # max pooling
-            z_pooled, _ = z.max(dim=1)  # [B,D]
-
-            # 分類器
-            logit = self.classifier(z_pooled) # [B,2]
-            all_logits.append(logit.unsqueeze(1)) # [B,1,2]
-
-        # 將所有keyword的結果串接
-        logits = torch.cat(all_logits, dim=1) # [B,K,2]
+        # 7. reshape回[B,K,2]
+        logits = logits_flat.view(B, K, -1)  # [B,K,2]
         return logits
     
     def training_step(self, batch, batch_idx):
@@ -447,6 +456,7 @@ if __name__ == "__main__":
         print(f"Loading pretrained AdaKWS model from {cfg.pt_ckpt}")
         model = AdaKWSModel.load_from_checkpoint(
             checkpoint_path=cfg.pt_ckpt,
+            strict=False,
             cfg=cfg,
             whisper_size=cfg.whisper_size,
             lang=cfg.lang
