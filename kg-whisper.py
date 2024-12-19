@@ -29,7 +29,7 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 import json
@@ -154,7 +154,14 @@ class WhisperTextModule(LightningModule):
                 # print(str(e))
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
+        
+        if cfg.prompt != 0: # freeze whisper encoder & keyword spotter gradients for prompt
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
                 
+            for param in self.model.keyword_spotter.parameters():
+                param.requires_grad = False
+        
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -171,10 +178,6 @@ class WhisperTextModule(LightningModule):
         dec_input_ids = batch["dec_input_ids"].long()   # [B, L_dec]
         labels = batch["labels"].long()  # 原本的 label shape: [B, L_dec]
         all_keyword_tokens = batch["keyword_tokens"].long()  # [B,K,L_kw]
-        
-        if self.cfg.prompt != 0: # freeze whisper encoder gradients for prompt
-            for p in self.model.encoder.parameters():
-                p.requires_grad = False
 
         # 1. Whisper encoder
         audio_features = self.model.encoder(input_ids)  # [B,T,D]
@@ -534,7 +537,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()
