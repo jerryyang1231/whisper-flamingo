@@ -90,12 +90,10 @@ class YTTDTaigiTRSDataset(Dataset):
 
         text = self.text_normalizer(text)
         text = text.replace(" ", "")
-        # print("text :", text)
+
         all_keywords = get_all_keywords(mandarin_text, self.dictionary)
         all_keywords = [self.text_normalizer(word).replace(" ", "") for word in all_keywords]
-        # print("all_keywords :", all_keywords)
         filtered_keywords = [word for word in all_keywords if word in text]
-        # print("filtered_keywords :", filtered_keywords)
         
         # 過濾負樣本：從 all_keywords 中篩選不在 text 中的詞
         negative_keywords = [word for word in all_keywords if word not in text]
@@ -168,6 +166,11 @@ class WhisperTextModule(LightningModule):
                                         sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         )
         
+        # freeze whisper encoder gradients for prompt
+        if cfg.prompt != 0:
+            for p in self.model.encoder.parameters():
+                p.requires_grad = False
+
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
             state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
@@ -197,10 +200,6 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        
-        if self.cfg.prompt != 0: # freeze whisper encoder gradients for prompt
-            for p in self.model.encoder.parameters():
-                p.requires_grad = False
 
         audio_features = self.model.encoder(input_ids, training=True)
 
@@ -268,7 +267,6 @@ class WhisperTextModule(LightningModule):
                 
                 # 解碼
                 decoded_o = self.tokenizer.decode(o_filtered)
-                
                 decoded_l = self.tokenizer.decode(l_filtered)
                 
                 # 正規化文本並移除空格
@@ -410,7 +408,6 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
         logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off

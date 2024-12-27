@@ -18,7 +18,7 @@ from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
-    WhisperDataCollatorWhithPadding_taigi,
+    KG_WhisperDataCollatorWhithPadding_taigi,
     whisper_optimizer,
     setup_logging_and_checkpoint_taigi,
     wer_cer,
@@ -29,14 +29,16 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 import json
+from pytorch_lightning.profilers import PyTorchProfiler
+from collections import defaultdict
+import random
 
 # my command
 # python -u kg-whisper.py config/audio-text/kg-whisper.yaml
-# CUDA_VISIBLE_DEVICES=0 python -u kg-whisper.py config/audio-text/kg-whisper.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -96,8 +98,8 @@ class YTTDTaigiTRSDataset(Dataset):
         
         # 生成 `keyword_tokens`
         # 將所有關鍵字轉換為 tokens，並使用 tokenizer 編碼
-        keyword_tokens = [self.tokenizer.encode(" " + keyword) for keyword in all_keywords]
-        # keyword_tokens = [self.tokenizer.encode("|" + keyword) for keyword in all_keywords]
+        # keyword_tokens = [self.tokenizer.encode(" " + keyword) for keyword in all_keywords]
+        keyword_tokens = [self.tokenizer.encode("|" + keyword) for keyword in all_keywords]
         
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
@@ -177,52 +179,17 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]           # [B, n_mels, T]
         dec_input_ids = batch["dec_input_ids"].long()   # [B, L_dec]
         labels = batch["labels"].long()  # 原本的 label shape: [B, L_dec]
-        all_keyword_tokens = batch["keyword_tokens"].long()  # [B,K,L_kw]
+        keyword_tokens = batch["keyword_tokens"].long()  # [B,K,L_kw]
 
         # 1. Whisper encoder
         audio_features = self.model.encoder(input_ids)  # [B,T,D]
         
         # 2. AdaKWS forward
-        kws_logits = self.model.keyword_spotter(audio_features, all_keyword_tokens) # [B,K,2]
+        kws_logits = self.model.keyword_spotter(audio_features, keyword_tokens) # [B,K,2]
         kws_pred = kws_logits.argmax(dim=-1)  # [B,K]
         
-        B = dec_input_ids.size(0)
         sop_id = self.tokenizer.sot_prev 
-        new_dec_input_ids_list = []
-        new_labels_list = []
-
-        for i in range(B):
-            # 取出第 i 個 sample 的關鍵字預測結果
-            pred_row = kws_pred[i]  # [K]
-            kw_tokens_for_this_sample = all_keyword_tokens[i]  # [K,L_kw]
-
-            # 收集所有預測為1的 keyword tokens
-            chosen_tokens_list = []
-            for k_idx, p in enumerate(pred_row):
-                if p == 1:
-                    chosen_tokens_list.append(kw_tokens_for_this_sample[k_idx])
-
-            if len(chosen_tokens_list) > 0:
-                # 把多個keyword拼接在一起 
-                chosen_tokens = torch.cat(chosen_tokens_list, dim=0)  # [sum_of_L_kw]
-            else:
-                # 如果沒有任何keyword被偵測出，可以給空tensor或保留空
-                chosen_tokens = torch.tensor([], dtype=torch.long, device=dec_input_ids.device)
-
-            # 在最前面插入 'sop' token
-            chosen_tokens = torch.cat([torch.tensor([sop_id], device=dec_input_ids.device), chosen_tokens], dim=0)
-            a = chosen_tokens.size(0)   # a = prompt長度(包含sop)
-            
-            # 3. 拼接 new_dec_input_ids
-            new_dec_input_ids = torch.cat([chosen_tokens, dec_input_ids[i]], dim=0)
-            new_dec_input_ids_list.append(new_dec_input_ids)
-            
-            # 4. 對應地修改 labels
-            # 先在 labels 前面插入 a 個 -100
-            new_label = torch.cat([torch.full((a,), -100, device=labels.device, dtype=labels.dtype),
-                                labels[i]], dim=0)
-            
-            new_labels_list.append(new_label)
+        new_dec_input_ids_list, new_labels_list, prompt_lens_list = self.gather_keywords_and_cat(kws_pred, keyword_tokens, dec_input_ids, labels, sop_id)        
 
         # 5. 對 new_dec_input_ids_list 和 new_labels_list 做 padding 到同一長度 b
         max_len = max(seq.size(0) for seq in new_dec_input_ids_list)
@@ -254,57 +221,18 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]           # [B, n_mels, T]
         dec_input_ids = batch["dec_input_ids"].long()   # [B, L_dec]
         labels = batch["labels"].long()  # 原本的 label shape: [B, L_dec]
-        all_keyword_tokens = batch["keyword_tokens"].long()  # [B,K,L_kw]
+        keyword_tokens = batch["keyword_tokens"].long()  # [B,K,L_kw]
 
         # 1. Whisper encoder
         audio_features = self.model.encoder(input_ids, training=True)
         
         # 2. AdaKWS forward
-        kws_logits = self.model.keyword_spotter(audio_features, all_keyword_tokens)  # [B,K,2]
+        kws_logits = self.model.keyword_spotter(audio_features, keyword_tokens)  # [B,K,2]
         kws_pred = kws_logits.argmax(dim=-1)  # [B,K]
 
-        B = dec_input_ids.size(0)
         sop_id = self.tokenizer.sot_prev 
-        new_dec_input_ids_list = []
-        new_labels_list = []
-        prompt_lens_list = []  # 用來記錄每個sample的prompt長度
+        new_dec_input_ids_list, new_labels_list, prompt_lens_list = self.gather_keywords_and_cat(kws_pred, keyword_tokens, dec_input_ids, labels, sop_id)
 
-        for i in range(B):
-            # 第 i 條樣本
-            pred_row = kws_pred[i]  # [K]
-            kw_tokens_for_this_sample = all_keyword_tokens[i]  # [K, L_kw]
-            
-            # 收集所有預測為1的 keyword tokens
-            chosen_tokens_list = []
-            for k_idx, p in enumerate(pred_row):
-                if p == 1:
-                    chosen_tokens_list.append(kw_tokens_for_this_sample[k_idx])
-            
-            if len(chosen_tokens_list) > 0:
-                # 把多個keyword拼接在一起 
-                chosen_tokens = torch.cat(chosen_tokens_list, dim=0)  # shape [sum_of_L_kw]
-            else:
-                # 如果沒有任何keyword被偵測出，可以給空tensor或保留空
-                chosen_tokens = torch.tensor([], dtype=torch.long, device=dec_input_ids.device)
-
-            # 在最前面插入 sop token
-            chosen_tokens = torch.cat([torch.tensor([sop_id], device=dec_input_ids.device), chosen_tokens], dim=0)
-            a = chosen_tokens.size(0)   # a = prompt長度(包含sop)
-
-            # 記錄該 sample 的 prompt_len
-            prompt_lens_list.append(a)
-            
-            # 3. 拼接 new_dec_input_ids
-            new_dec_input_ids = torch.cat([chosen_tokens, dec_input_ids[i]], dim=0)
-            new_dec_input_ids_list.append(new_dec_input_ids)
-
-            # 4. 對應地修改 labels
-            # 先在 labels 前面插入 a 個 -100
-            new_label = torch.cat([torch.full((a,), -100, device=labels.device, dtype=labels.dtype),
-                                labels[i]], dim=0)
-            
-            new_labels_list.append(new_label)
-        
         # 5. 對 new_dec_input_ids_list 和 new_labels_list 做 padding 到同一長度 b
         max_len = max(seq.size(0) for seq in new_dec_input_ids_list)
         padded_new_dec_ids = []
@@ -337,7 +265,7 @@ class WhisperTextModule(LightningModule):
             # remove all decoder predictions after first eot for proper decoding
             tokens = torch.argmax(out, dim=2) 
 
-            for i in range(B):
+            for i in range(tokens.size(0)):
                 pl = prompt_lens[i].item()  # prompt_lens[i] 是當前樣本的prompt長度
                 # 對 tokens[i, pl:] 這段進行 EOT 搜尋
                 eot_positions = (tokens[i, pl:] == self.tokenizer.eot).nonzero(as_tuple=False)
@@ -405,9 +333,70 @@ class WhisperTextModule(LightningModule):
             self.log("{}/cer_{}".format(log_prefix[dataloader_idx], mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/wer_{}".format(log_prefix[dataloader_idx], mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/acc_{}".format(log_prefix[dataloader_idx], mod), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        
         return
-   
+
+    def gather_keywords_and_cat(
+        self,
+        kws_pred: torch.Tensor,         # [B, K] with 0/1
+        keyword_tokens: torch.Tensor,   # [B, K, L_kw]
+        dec_input_ids: torch.Tensor,    # [B, L_dec]
+        labels: torch.Tensor,           # [B, L_dec]
+        sop_id: int,
+    ):
+        """
+        回傳:
+        new_dec_input_ids_list: List[torch.Tensor], 每個sample都拼好 sop + 所有keyword(=1) + 原 dec_input_ids
+        new_labels_list: List[torch.Tensor], 每個 sample 的 labels，前面補 a 個 -100
+        prompt_lens_list: List[int], 每個sample對應的 prompt 長度
+        """
+        B, K, L_kw = keyword_tokens.shape
+        device = keyword_tokens.device
+        max_k = self.cfg.max_keywords_for_prompt  
+
+        # (1) 找出哪些位置為1: shape [N,2]，每行 [b_idx, k_idx]
+        indices = (kws_pred == 1).nonzero(as_tuple=False)
+
+        # (2) 以 b_idx 為key，把 k_idx 收集起來
+        sample_dict = defaultdict(list)
+        for row in indices:
+            b_idx, k_idx = row[0].item(), row[1].item()
+            sample_dict[b_idx].append(k_idx)
+
+        new_dec_input_ids_list = []
+        new_labels_list = []
+        prompt_lens_list = []
+
+        for b in range(B):
+            # 取出該sample所有 k_idx
+            k_idx_list = sample_dict[b]  # 該樣本的有效關鍵字索引
+            if len(k_idx_list) == 0:
+                # 沒有任何keyword
+                chosen_tokens = torch.tensor([], dtype=torch.long, device=device)
+            else:
+                # 如果超過 max_k，就隨機挑選 max_k 個
+                if len(k_idx_list) > max_k:
+                    k_idx_list = random.sample(k_idx_list, max_k)
+                
+                # gather shape [X, L_kw]
+                selected_tokens = keyword_tokens[b, k_idx_list, :]  # [X, L_kw]
+                # 把多個 keyword tokens concat 成一條 => [X * L_kw]
+                chosen_tokens = selected_tokens.reshape(-1)
+
+            # 在最前面插入 sop_id
+            chosen_tokens = torch.cat([torch.tensor([sop_id], device=device), chosen_tokens], dim=0)
+            a = chosen_tokens.size(0)  # prompt長度(含 sop)
+            prompt_lens_list.append(a)
+
+            # 與 dec_input_ids 拼接
+            new_dec_input_ids = torch.cat([chosen_tokens, dec_input_ids[b]], dim=0)
+            new_dec_input_ids_list.append(new_dec_input_ids)
+            
+            # 對應地修改 labels，前面補 a 個 -100
+            new_label = torch.cat([torch.full((a,), -100, device=labels.device, dtype=labels.dtype), labels[b]], dim=0)
+            new_labels_list.append(new_label)
+
+        return new_dec_input_ids_list, new_labels_list, prompt_lens_list
+    
     def configure_optimizers(self):
         model = self.model
         optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)        
@@ -439,7 +428,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
+                          collate_fn=KG_WhisperDataCollatorWhithPadding_taigi())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -459,7 +448,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
+                          collate_fn=KG_WhisperDataCollatorWhithPadding_taigi())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -479,7 +468,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
+                          collate_fn=KG_WhisperDataCollatorWhithPadding_taigi())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -497,7 +486,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="KG-whisper",
             config=cfg,
-            name="kg whisper"
+            name="kg whisper (learning rate=1.0e-6)"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -512,8 +501,14 @@ if __name__ == "__main__":
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
     
+    profiler = PyTorchProfiler(
+        export_to_chrome=True,  # 可視化結果
+        output_filename="trace_kg-whisper.json"  # 儲存結果
+    )
+    
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
+        # profiler=profiler,
         precision=cfg.precision,
         strategy=strategy,
         accelerator="gpu",
@@ -536,7 +531,7 @@ if __name__ == "__main__":
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
-        trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
+        # trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
         trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run

@@ -195,33 +195,6 @@ class ResidualAttentionBlock(nn.Module):
         x = x + self.mlp(self.mlp_ln(x))        
         return x
 
-class ResNet1D(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers):
-        super(ResNet1D, self).__init__()
-        self.layers = nn.ModuleList()
-        for _ in range(num_layers):
-            print(f"Add ResNet layers")
-            self.layers.append(nn.Sequential(
-                nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
-                nn.Conv1d(hidden_dim, input_dim, kernel_size=3, padding=1),
-                nn.BatchNorm1d(input_dim)
-            ))
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        # x 形狀: (batch_size, seq_length, input_dim)
-        x = x.permute(0, 2, 1)  # 轉換為 (batch_size, input_dim, seq_length)
-        for layer in self.layers:
-            identity = x
-            out = layer(x)
-            out += identity
-            out = self.relu(out)
-            x = out
-        x = x.permute(0, 2, 1)  # 轉回 (batch_size, seq_length, input_dim)
-        return x
-
 class AudioEncoder(nn.Module):
     def __init__(
         self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, 
@@ -242,8 +215,7 @@ class AudioEncoder(nn.Module):
         self.dropout_rate = dropout_rate
         self.dropout = torch.nn.Dropout(dropout_rate)      
 
-    def forward(self, x: Tensor, x_v=None, training=False, test_a=False, test_v=False, track_norm=False, 
-                padding_mask=None):
+    def forward(self, x: Tensor, track_norm=False, padding_mask=None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
@@ -273,7 +245,7 @@ class AudioEncoder(nn.Module):
 class TextDecoder(nn.Module):
     def __init__(
         self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float, add_gated_x_attn: int,
-        bert_encoder: bool, bert_hidden_size: int, add_resnet: bool, num_resnet_layer: int, mode: str, sequential_gated_x_attn: bool
+        bert_encoder: bool, bert_hidden_size: int, mode: str, sequential_gated_x_attn: bool
     ):
         super().__init__()
 
@@ -303,15 +275,11 @@ class TextDecoder(nn.Module):
         else:
             self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
         
-        self.add_resnet = add_resnet
-        if add_resnet:
-            self.resnet = ResNet1D(n_state, n_state, num_layers=num_resnet_layer)
-        
         self.mode = mode
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
                 xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None,
-                source_embedding: Optional[Tensor] = None, value_embedding: Optional[Tensor] = None):
+        ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens
@@ -330,8 +298,6 @@ class TextDecoder(nn.Module):
         if self.mode == "mix":            
             # xt_1 without BERT and without positional embedding
             if xt_1 is not None:
-                if self.add_resnet:
-                    xt_1 = self.resnet(xt_1)
                 # No positional embedding for xt_1 in "mix" mode
                 xt_1 = xt_1.to(xa.dtype)
 
@@ -351,8 +317,6 @@ class TextDecoder(nn.Module):
         elif self.mode == "keyword":
             # xt_1 without BERT and without positional embedding
             if xt_1 is not None:
-                if self.add_resnet:
-                    xt_1 = self.resnet(xt_1)
                 # No positional embedding for xt_1 in "mix" mode
                 xt_1 = xt_1.to(xa.dtype)         
         
@@ -370,11 +334,129 @@ class TextDecoder(nn.Module):
         
         return logits
 
+class AdaKWS_TextEncoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim=128, hidden_dim=256):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_dim, num_layers=4, batch_first=True)
+        self.d_model = 768
+        self.fc_mu = nn.Linear(hidden_dim, self.d_model)
+        self.fc_sigma = nn.Linear(hidden_dim, self.d_model)
+    
+    def forward(self, tokenized_keyword):
+        # tokenized_keyword: [B, K, L]
+        B, K, L = tokenized_keyword.shape
+
+        # 1. 展開到 [B*K, L]
+        flattened = tokenized_keyword.view(B*K, L)
+
+        # 2. Embedding: [B*K, L, embed_dim]
+        emb = self.embedding(flattened)
+
+        # 3. LSTM: 一次性 forward
+        _, (h, _) = self.lstm(emb)  # h: [num_layers, B*K, hidden_dim]
+        h_final = h[-1]            # [B*K, hidden_dim]
+
+        # 4. 分別產生 mu_v, sigma_v
+        mu_v = self.fc_mu(h_final)      # [B*K, d_model]
+        sigma_v = self.fc_sigma(h_final)
+
+        # 5. reshape 回 [B, K, d_model]
+        mu_v = mu_v.view(B, K, -1)
+        sigma_v = sigma_v.view(B, K, -1)
+        return mu_v, sigma_v
+
+class AdaIN(nn.Module):
+    def __init__(self, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, z, mu_v, sigma_v):
+        # z: [B,T,D]
+        # mu_v, sigma_v: [B,1,D] (已針對單一關鍵字)
+        mu_z = z.mean(dim=1, keepdim=True)  # [B,1,D]
+        sigma_z = z.var(dim=1, keepdim=True, unbiased=False).sqrt() + self.eps  # [B,1,D]
+        z_norm = (z - mu_z) / sigma_z
+        out = sigma_v * z_norm + mu_v  # 單一關鍵字，不需平均
+        return out
+
+class KeywordAdaptiveModule(nn.Module):
+    def __init__(self, d_model=768, n_heads=8, dim_ff=2048, dropout=0.1):
+        super().__init__()
+        self.adain1 = AdaIN()
+        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.dropout1 = nn.Dropout(dropout)
+        self.adain2 = AdaIN()
+        self.fc1 = nn.Linear(d_model, dim_ff)
+        self.fc2 = nn.Linear(dim_ff, d_model)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x, mu_v, sigma_v):
+        # x: [B,T,D], mu_v,sigma_v: [B,1,D]
+        x_norm = self.adain1(x, mu_v, sigma_v)
+        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm)
+        x = x + self.dropout1(attn_out)
+        x_norm = self.adain2(x, mu_v, sigma_v)
+        ff_out = self.fc2(F.relu(self.fc1(x_norm)))
+        x = x + self.dropout2(ff_out)
+        return x
+
+class AdaKWS(nn.Module):
+    def __init__(self, vocab_size) -> None:
+        super().__init__()  
+        
+        # Text encoder (φ)
+        self.text_encoder = AdaKWS_TextEncoder(vocab_size=vocab_size)
+
+        # Keyword-Adaptive modules (two sequential blocks)
+        self.kw_module1 = KeywordAdaptiveModule(d_model=self.text_encoder.d_model)
+        self.kw_module2 = KeywordAdaptiveModule(d_model=self.text_encoder.d_model)
+
+        # Classifier head
+        # 對每個 keyword 輸出二分類結果，因此維度是 d_model -> 2
+        self.classifier = nn.Linear(768, 2)
+    
+    def forward(self, audio_features, keyword_tokens):
+
+        # 1. Whisper encoder
+        # audio_features = self.whisper.encoder(audio)  # [B, T, D=768]
+        B, T, D = audio_features.shape
+        
+        # 2. Text encoder
+        # mu_v, sigma_v: [B,K,D]
+        mu_v, sigma_v = self.text_encoder(keyword_tokens)
+        
+        # 3. 平行處理，把[ B, T, D ]展開成[ B, K, T, D ]，再reshape成[ B*K, T, D ]
+        #   同理mu_v, sigma_v reshape成[ B*K, D ] 
+        K = mu_v.size(1)  # keyword數量
+        audio_features = audio_features.unsqueeze(1).expand(B, K, T, D) # [B,K,T,D]
+        audio_features = audio_features.contiguous().view(B*K, T, D)    # [B*K, T, D]
+       
+        mu_v = mu_v.view(B*K, D)       # [B*K, D]
+        sigma_v = sigma_v.view(B*K, D) # [B*K, D]
+
+        # 4. 通過 KeywordAdaptiveModule (兩層)
+        z = self.kw_module1(audio_features, mu_v.unsqueeze(1), sigma_v.unsqueeze(1))  # shape [B*K,T,D]
+        z = self.kw_module2(z, mu_v.unsqueeze(1), sigma_v.unsqueeze(1))               # shape [B*K,T,D]
+        
+        # 5. Pooling
+        # z -> [B*K,D]
+        z_pooled, _ = torch.max(z, dim=1)
+        
+        # 6. Classifier
+        # logits -> [B*K,2]
+        logits_flat = self.classifier(z_pooled)
+
+        # 7. reshape回[B,K,2]
+        logits = logits_flat.view(B, K, -1)  # [B,K,2]
+        return logits
+
 class Whisper(nn.Module):
     def __init__(self, dims: ModelDimensions, dropout_rate: float, video: bool, 
                  video_model_path: str, av_hubert_path: str, prob_av: float, prob_a: float, av_hubert_encoder: bool,
                  av_fusion: str, add_adapter: bool, adapter_dim: int, add_gated_x_attn: int, 
-                 bert_encoder: bool, bert_dim: int, add_resnet: bool, num_resnet_layer: int, mode: str, sequential_gated_x_attn: bool):
+                 bert_encoder: bool, bert_dim: int, mode: str, sequential_gated_x_attn: bool,
+                 adakws_checkpoint: Optional[str] = None):
         super().__init__()
         self.dims = dims
         self.encoder = AudioEncoder(
@@ -404,11 +486,23 @@ class Whisper(nn.Module):
             add_gated_x_attn,
             bert_encoder,
             bert_dim,
-            add_resnet,
-            num_resnet_layer,
             mode,
             sequential_gated_x_attn,
         )
+        self.keyword_spotter = AdaKWS(
+            self.dims.n_vocab,
+        )
+
+        # 加載 AdaKWS 預訓練權重
+        if adakws_checkpoint is not None:
+            print(f"Loading AdaKWS checkpoint from {adakws_checkpoint}")
+            checkpoint = torch.load(adakws_checkpoint, map_location="cpu")
+            if 'state_dict' in checkpoint:
+                print("Loading weights with strict=False")
+                self.keyword_spotter.load_state_dict(checkpoint['state_dict'], strict=False)
+            else:
+                self.keyword_spotter.load_state_dict(checkpoint)
+
 
     def embed_audio(self, mel: torch.Tensor):
         return self.encoder(mel)

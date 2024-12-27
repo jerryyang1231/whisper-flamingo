@@ -204,8 +204,6 @@ class WhisperTextModule(LightningModule):
         audio_features = self.model.encoder(input_ids)
         
         out_at = self.model.decoder(dec_input_ids, audio_features)
-        
-        # labels[labels == -100] = self.tokenizer.eot
 
         mod_list = {"at": out_at}
         for mod, out in mod_list.items():         

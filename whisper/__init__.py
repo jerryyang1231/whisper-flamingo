@@ -102,13 +102,6 @@ def load_model(
     download_root: str = None,
     in_memory: bool = False,
     dropout_rate: float = 0.0,
-    video: bool = False,
-    video_model_path: str = "",
-    av_hubert_path: str = "av_hubert/avhubert",
-    prob_av: float = 0.0,
-    prob_a: float = 0.0,
-    av_hubert_encoder: bool = False,
-    av_fusion: str = "early",
     add_adapter: bool = False,
     adapter_dim: int = 256,
     add_gated_x_attn: int = 0,
@@ -116,7 +109,15 @@ def load_model(
     bert_dim: int = 768,
     mode: str = "translation",
     sequential_gated_x_attn: bool = False,
-    adakws_checkpoint="/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/tmp_best/step-160000-f1=0.8662.ckpt"
+    tokenizer: object = None,
+    ctc_weight: float = 0.5,
+    lsm_weight: float = 0.0,
+    length_normalized_loss: bool = False,
+    add_context_att: bool = False,
+    add_null_context: bool = True,
+    add_copy_loss: bool = False,
+    concoder_cofig: dict = None,
+    decoder_conf: dict = None,
 ) -> Whisper:
     """
     Load a Whisper ASR model
@@ -164,9 +165,10 @@ def load_model(
 
     dims = ModelDimensions(**checkpoint["dims"])
     print("Whisper dropout rate : {}".format(dropout_rate))
-    model = Whisper(dims, dropout_rate, video, video_model_path, av_hubert_path, prob_av, prob_a, 
-                    av_hubert_encoder, av_fusion, add_adapter, adapter_dim, add_gated_x_attn, 
-                    bert_encoder, bert_dim, mode, sequential_gated_x_attn, adakws_checkpoint,
+    model = Whisper(dims, dropout_rate, add_adapter, adapter_dim, add_gated_x_attn, 
+                    bert_encoder, bert_dim, mode, sequential_gated_x_attn, tokenizer,
+                    ctc_weight, lsm_weight, length_normalized_loss, add_context_att,
+                    add_null_context, add_copy_loss, concoder_cofig, decoder_conf
                     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 

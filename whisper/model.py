@@ -1,7 +1,7 @@
 import base64
 import gzip
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import torch
@@ -14,6 +14,18 @@ from .decoding import detect_language as detect_language_function
 from .transcribe import transcribe as transcribe_function
 
 from transformers import BertModel, BertTokenizer
+from wenet.transformer.ctc import CTC
+from wenet.transformer.label_smoothing_loss import LabelSmoothingLoss
+from wenet.utils.common import (IGNORE_ID, add_sos_eos, log_add,
+                                remove_duplicates_and_blank, th_accuracy,
+                                reverse_pad_list)
+from model.contextual_encoder import LSTMContextCoder
+from wenet.transformer.attention import MultiHeadedAttention
+from wenet.transformer.decoder_layer import DecoderLayer
+from wenet.transformer.embedding import PositionalEncoding
+from wenet.transformer.positionwise_feed_forward import PositionwiseFeedForward
+from wenet.utils.mask import (subsequent_mask, make_pad_mask)
+from model.contextual_encoder import ContextualAttention, CrossAttention, SimpleAttention, DotAttention
 
 @dataclass
 class ModelDimensions:
@@ -198,56 +210,55 @@ class ResidualAttentionBlock(nn.Module):
 class AudioEncoder(nn.Module):
     def __init__(
         self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, 
-              dropout_rate: float, video: bool, video_model_path: str, av_hubert_path: str,
-              prob_av: float, prob_a: float, av_hubert_encoder: bool, av_fusion: str,
-              add_adapter: bool, adapter_dim: int,
+              dropout_rate: float, add_adapter: bool, adapter_dim: int,
     ):
         super().__init__()
         self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
         self.conv2 = Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
         self.register_buffer("positional_embedding", sinusoids(n_ctx, n_state))
-
         self.blocks: Iterable[ResidualAttentionBlock] = nn.ModuleList(
             [ResidualAttentionBlock(n_state, n_head, False,
                                     add_adapter, adapter_dim, add_gated_x_attn=0) for _ in range(n_layer)]
         )
         self.ln_post = LayerNorm(n_state)
         self.dropout_rate = dropout_rate
-        self.dropout = torch.nn.Dropout(dropout_rate)      
+        self.dropout = torch.nn.Dropout(dropout_rate)
+        self.subsampling_rate = 2
 
-    def forward(self, x: Tensor, x_v=None, training=False, test_a=False, test_v=False, track_norm=False, 
-                padding_mask=None):
+    def forward(self, x: Tensor, x_lens: Tensor, track_norm=False, padding_mask=None):
         """
         x : torch.Tensor, shape = (batch_size, n_mels, n_ctx)
             the mel spectrogram of the audio
-        """        
+        x_lens : torch.Tensor, shape = (batch_size,)
+            the original lengths of each input sequence
+        """
         x = F.gelu(self.conv1(x))
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)
+
+        # 計算 encoder_out_lens
+        encoder_out_lens = torch.ceil(x_lens / self.subsampling_rate).long()
+
         if track_norm:
             x_norm = torch.linalg.norm(x, dim=-1).mean()
 
-        # NOTE: pos embedding has max length of 1500 (30s after conv downsample from 3000 mel frames)
+        # Positional embedding
         if x.shape[1] > 1500:
-            x = x[ :, :1500, :]
-    
-        # NOTE: if max_len is 30s, then the cropping doesn't do anything.
-        x = (x + self.positional_embedding[: x.shape[1]]).to(x.dtype) # trim pos embedding
-        
+            x = x[:, :1500, :]
+        x = (x + self.positional_embedding[: x.shape[1]]).to(x.dtype)
+
         for layer, block in enumerate(self.blocks):
             x = block(x)
-
         x = self.ln_post(x)
 
         if track_norm:
-            return x, x_norm
-        return x
+            return x, x_norm, encoder_out_lens
+        return x, encoder_out_lens
 
 class TextDecoder(nn.Module):
     def __init__(
         self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float, add_gated_x_attn: int,
-        bert_encoder: bool, bert_hidden_size: int, mode: str, sequential_gated_x_attn: bool
-    ):
+        decoder_conf: dict,):
         super().__init__()
 
         self.token_embedding = nn.Embedding(n_vocab, n_state)
@@ -257,7 +268,6 @@ class TextDecoder(nn.Module):
             [
                 ResidualAttentionBlock(n_state, n_head, cross_attention=True, 
                                        add_gated_x_attn=add_gated_x_attn,
-                                       sequential_gated_x_attn=sequential_gated_x_attn
                                        )
                 for _ in range(n_layer)
             ]
@@ -267,19 +277,30 @@ class TextDecoder(nn.Module):
         mask = torch.empty(n_ctx, n_ctx).fill_(-np.inf).triu_(1)
         self.register_buffer("mask", mask, persistent=False)
         self.dropout_rate = dropout_rate
-        self.dropout = torch.nn.Dropout(dropout_rate)     
+        self.dropout = torch.nn.Dropout(dropout_rate)
 
-        self.bert_encoder = bert_encoder
+        self.contextual_att = decoder_conf["contextual_att"]
+        self.conatt_type = decoder_conf["att_type"]
+        self.add_copy_loss = decoder_conf["add_copy_loss"]
+        self.cocoder_out_dim = decoder_conf["cocoder_out_dim"]
         
-        if bert_hidden_size != n_state:
-            self.xt_projection = nn.Linear(bert_hidden_size, n_state)
+        if self.conatt_type == 'contextual':
+            self.conatt = ContextualAttention(att_dim=n_state,        
+                                        decoder_dim=n_state,
+                                        cocoder_dim=self.cocoder_out_dim)
+            self.output_layer = torch.nn.Linear(n_state+self.cocoder_out_dim, vocab_size)
+        elif self.conatt_type == 'crossatt':
+            self.conatt = CrossAttention(n_state, 4)
+            self.output_layer = torch.nn.Linear(n_state+n_state, vocab_size)
+        elif self.conatt_type == 'simpleatt':
+            self.conatt = SimpleAttention(att_dim=n_state,        
+                                        decoder_dim=n_state,
+                                        cocoder_dim=self.cocoder_out_dim)
+            self.output_layer = torch.nn.Linear(n_state+self.cocoder_out_dim, n_vocab)
         else:
-            self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
-        
-        self.mode = mode
+            raise ValueError(f'No this att type: {conatt_type}!')
 
-    def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
-                xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None,
+    def forward(self, x: Tensor, xa: Tensor, context: Tensor,  need_att_mask: Tensor, kv_cache: Optional[dict] = None, 
         ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
@@ -293,184 +314,52 @@ class TextDecoder(nn.Module):
             self.token_embedding(x)
             + self.positional_embedding[offset : offset + x.shape[-1]]
         )
-        x = x.to(xa.dtype)
+        x = x.to(xa.dtype)  
 
-        # Process xt_1 and xt_2 based on the specified mode
-        if self.mode == "mix":            
-            # xt_1 without BERT and without positional embedding
-            if xt_1 is not None:
-                # No positional embedding for xt_1 in "mix" mode
-                xt_1 = xt_1.to(xa.dtype)
-
-            # xt_2 with BERT and positional embedding
-            if xt_2 is not None:
-                if xt_2.shape[-1] != x.shape[-1]:
-                    xt_2 = self.xt_projection(xt_2)
-                xt_2 = xt_2 + self.positional_embedding[offset: offset + xt_2.shape[1]]
-                xt_2 = xt_2.to(xa.dtype)
-        elif self.mode == "translation":
-            # xt_1 with BERT and positional embedding
-            if xt_1 is not None:
-                if xt_1.shape[-1] != x.shape[-1]:
-                    xt_1 = self.xt_projection(xt_1)
-                xt_1 = xt_1 + self.positional_embedding[offset: offset + xt_1.shape[1]]
-                xt_1 = xt_1.to(xa.dtype)   
-        elif self.mode == "keyword":
-            # xt_1 without BERT and without positional embedding
-            if xt_1 is not None:
-                # No positional embedding for xt_1 in "mix" mode
-                xt_1 = xt_1.to(xa.dtype)         
-        
         # Pass through the layers
         for layer, block in enumerate(self.blocks):
-            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt_1=xt_1, xt_2=xt_2)
+            x = block(x, xa, mask=self.mask, kv_cache=kv_cache)
         
         # Apply layer normalization
         x = self.ln(x)
         
-        # Calculate logits
-        logits = (
-            x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)
-        ).float()
+        # add attention module here, attention with vocabulary
+        if self.contextual_att :
+            context_repr, p, score = self.conatt(x, context, need_att_mask)
+            x = torch.cat((x, context_repr), dim=-1)  # shape = (B, seq_len, n_state + context_dim)
+            logits = self.output_layer(x)
+        else:
+            logits = (
+                x @ torch.transpose(self.token_embedding.weight.to(x.dtype), 0, 1)
+            ).float()
         
-        return logits
-
-class AdaKWS_TextEncoder(nn.Module):
-    def __init__(self, vocab_size, embed_dim=128, hidden_dim=256):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.lstm = nn.LSTM(embed_dim, hidden_dim, num_layers=4, batch_first=True)
-        self.d_model = 768
-        self.fc_mu = nn.Linear(hidden_dim, self.d_model)
-        self.fc_sigma = nn.Linear(hidden_dim, self.d_model)
-
-    def forward(self, tokenized_keyword):
-        # tokenized_keyword: [batch_size, max_keywords_per_sample, max_keyword_token_len]
-        batch_size, max_keywords, max_len = tokenized_keyword.shape
-        
-        # 初始化輸出
-        mu_v_list, sigma_v_list = [], []
-        
-        for i in range(max_keywords):
-            # 1. 取出每個關鍵字序列
-            keyword_seq = tokenized_keyword[:, i, :]  # [batch_size, max_keyword_token_len]
-            
-            # 2. Embedding 層
-            emb = self.embedding(keyword_seq)  # [batch_size, max_keyword_token_len, embed_dim]
-            
-            # 3. LSTM 層
-            _, (h, _) = self.lstm(emb)  # h: [num_layers, batch_size, hidden_dim]
-            
-            # 4. 取出最後一層的隱藏狀態
-            h_final = h[-1]  # [batch_size, hidden_dim]
-            
-            # 5. 生成 mu 和 sigma
-            mu_v = self.fc_mu(h_final)  # [batch_size, d_model]
-            sigma_v = self.fc_sigma(h_final)  # [batch_size, d_model]
-
-            # 6. 加入列表
-            mu_v_list.append(mu_v)
-            sigma_v_list.append(sigma_v)
-        
-        # 7. 堆疊結果
-        mu_v = torch.stack(mu_v_list, dim=1)  # [batch_size, max_keywords_per_sample, d_model]
-        sigma_v = torch.stack(sigma_v_list, dim=1)  # [batch_size, max_keywords_per_sample, d_model]
-        
-        return mu_v, sigma_v
-
-class AdaIN(nn.Module):
-    def __init__(self, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, z, mu_v, sigma_v):
-        # z: [B,T,D]
-        # mu_v, sigma_v: [B,1,D] (已針對單一關鍵字)
-        mu_z = z.mean(dim=1, keepdim=True)  # [B,1,D]
-        sigma_z = z.var(dim=1, keepdim=True, unbiased=False).sqrt() + self.eps  # [B,1,D]
-        z_norm = (z - mu_z) / sigma_z
-        out = sigma_v * z_norm + mu_v  # 單一關鍵字，不需平均
-        return out
-
-class KeywordAdaptiveModule(nn.Module):
-    def __init__(self, d_model=768, n_heads=8, dim_ff=2048, dropout=0.1):
-        super().__init__()
-        self.adain1 = AdaIN()
-        self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
-        self.dropout1 = nn.Dropout(dropout)
-        self.adain2 = AdaIN()
-        self.fc1 = nn.Linear(d_model, dim_ff)
-        self.fc2 = nn.Linear(dim_ff, d_model)
-        self.dropout2 = nn.Dropout(dropout)
-
-    def forward(self, x, mu_v, sigma_v):
-        # x: [B,T,D], mu_v,sigma_v: [B,1,D]
-        x_norm = self.adain1(x, mu_v, sigma_v)
-        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm)
-        x = x + self.dropout1(attn_out)
-        x_norm = self.adain2(x, mu_v, sigma_v)
-        ff_out = self.fc2(F.relu(self.fc1(x_norm)))
-        x = x + self.dropout2(ff_out)
-        return x
-
-class AdaKWS(nn.Module):
-    def __init__(self, vocab_size) -> None:
-        super().__init__()  
-        
-        # Text encoder (φ)
-        self.text_encoder = AdaKWS_TextEncoder(vocab_size=vocab_size)
-
-        # Keyword-Adaptive modules (two sequential blocks)
-        self.kw_module1 = KeywordAdaptiveModule(d_model=self.text_encoder.d_model)
-        self.kw_module2 = KeywordAdaptiveModule(d_model=self.text_encoder.d_model)
-
-        # Classifier head
-        # 對每個 keyword 輸出二分類結果，因此維度是 d_model -> 2
-        self.classifier = nn.Linear(768, 2)
-    
-    def forward(self, audio_features, keyword_tokens):
-
-        # 1. Whisper encoder
-        # audio_features = self.whisper.encoder(audio)  # [B, T, D=768]
-        B, T, D = audio_features.shape
-        
-        # 2. Text encoder
-        # mu_v, sigma_v: [B,K,D]
-        mu_v, sigma_v = self.text_encoder(keyword_tokens)
-        
-        # 3. 平行處理，把[ B, T, D ]展開成[ B, K, T, D ]，再reshape成[ B*K, T, D ]
-        #   同理mu_v, sigma_v reshape成[ B*K, D ] 
-        K = mu_v.size(1)  # keyword數量
-        audio_features = audio_features.unsqueeze(1).expand(B, K, T, D) # [B,K,T,D]
-        audio_features = audio_features.contiguous().view(B*K, T, D)    # [B*K, T, D]
-       
-        mu_v = mu_v.view(B*K, D)       # [B*K, D]
-        sigma_v = sigma_v.view(B*K, D) # [B*K, D]
-
-        # 4. 通過 KeywordAdaptiveModule (兩層)
-        z = self.kw_module1(audio_features, mu_v.unsqueeze(1), sigma_v.unsqueeze(1))  # shape [B*K,T,D]
-        z = self.kw_module2(z, mu_v.unsqueeze(1), sigma_v.unsqueeze(1))               # shape [B*K,T,D]
-        
-        # 5. Pooling
-        # z -> [B*K,D]
-        z_pooled, _ = torch.max(z, dim=1)
-        
-        # 6. Classifier
-        # logits -> [B*K,2]
-        logits_flat = self.classifier(z_pooled)
-
-        # 7. reshape回[B,K,2]
-        logits = logits_flat.view(B, K, -1)  # [B,K,2]
-        return logits
+        if not self.add_copy_loss:
+            return logits 
+        else:
+            return logits, p
 
 class Whisper(nn.Module):
-    def __init__(self, dims: ModelDimensions, dropout_rate: float, video: bool, 
-                 video_model_path: str, av_hubert_path: str, prob_av: float, prob_a: float, av_hubert_encoder: bool,
-                 av_fusion: str, add_adapter: bool, adapter_dim: int, add_gated_x_attn: int, 
-                 bert_encoder: bool, bert_dim: int, mode: str, sequential_gated_x_attn: bool,
-                 adakws_checkpoint: Optional[str] = None):
+    def __init__(self, dims: ModelDimensions, dropout_rate: float, 
+                add_adapter: bool, adapter_dim: int, add_gated_x_attn: int, 
+                bert_encoder: bool, bert_dim: int, mode: str, sequential_gated_x_attn: bool, tokenizer: object,
+                ctc_weight: float, lsm_weight: float, length_normalized_loss: bool, add_context_att: bool,
+                add_null_context: bool, add_copy_loss: bool, concoder_cofig: dict, decoder_conf:dict,
+                ):
         super().__init__()
-        self.dims = dims
+
+        self.tokenizer = tokenizer
+        self.sot = self.tokenizer.sot
+        self.eot = self.tokenizer.eot
+        self.ctc_weight = ctc_weight
+        self.lsm_weight = lsm_weight
+        self.length_normalized_loss = length_normalized_loss
+        self.add_context_att = add_context_att
+        self.add_null_context = add_null_context
+        self.add_copy_loss = add_copy_loss
+        self.blank_id = 0
+        self.ignore_id = -100
+        
+        self.dims = dims       
         self.encoder = AudioEncoder(
             self.dims.n_mels,
             self.dims.n_audio_ctx,
@@ -478,13 +367,6 @@ class Whisper(nn.Module):
             self.dims.n_audio_head,
             self.dims.n_audio_layer,
             dropout_rate,
-            video,
-            video_model_path,
-            av_hubert_path,
-            prob_av,
-            prob_a,
-            av_hubert_encoder,
-            av_fusion,
             add_adapter,
             adapter_dim,
         )
@@ -496,38 +378,131 @@ class Whisper(nn.Module):
             self.dims.n_text_layer,
             dropout_rate,
             add_gated_x_attn,
-            bert_encoder,
-            bert_dim,
-            mode,
-            sequential_gated_x_attn,
+            decoder_conf,
         )
-        self.keyword_spotter = AdaKWS(
-            self.dims.n_vocab,
+        
+        if self.add_context_att:
+            self.concoder = LSTMContextCoder(self.dims.n_vocab, self.eot, add_null_context=add_null_context, **concoder_cofig)
+
+        self.ctc = CTC(self.dims.n_vocab, self.dims.n_audio_state)
+        
+        self.criterion_att = LabelSmoothingLoss(
+            size=self.dims.n_vocab,
+            padding_idx=self.ignore_id,
+            smoothing=self.lsm_weight,
+            normalize_length=self.length_normalized_loss,
         )
-
-        # 加載 AdaKWS 預訓練權重
-        if adakws_checkpoint is not None:
-            print(f"Loading AdaKWS checkpoint from {adakws_checkpoint}")
-            checkpoint = torch.load(adakws_checkpoint, map_location="cpu")
-            if 'state_dict' in checkpoint:
-                print("Loading weights with strict=False")
-                self.keyword_spotter.load_state_dict(checkpoint['state_dict'], strict=False)
-            else:
-                self.keyword_spotter.load_state_dict(checkpoint)
-            print(self.keyword_spotter.state_dict().keys())
-
 
     def embed_audio(self, mel: torch.Tensor):
         return self.encoder(mel)
 
     def logits(self, tokens: torch.Tensor, audio_features: torch.Tensor):
         return self.decoder(tokens, audio_features)
-
+    
     def forward(
-        self, mel: torch.Tensor, tokens: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        return self.decoder(tokens, self.encoder(mel))
+        self,
+        speech: torch.Tensor,
+        speech_lengths: torch.Tensor,
+        dec_input_ids: torch.Tensor,
+        text_lengths: torch.Tensor,
+        labels: torch.Tensor,
+        context=None,
+        need_att_mask=None,
+        att_tgt=None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
+        """Frontend + Encoder + Decoder + Calc loss
 
+        Args:
+            speech: (Batch, Length, ...)
+            speech_lengths: (Batch, )
+            text: (Batch, Length)
+            text_lengths: (Batch,)
+        """
+        
+        # 1. Encoder       
+        encoder_out, encoder_out_lens = self.encoder(speech, speech_lengths)
+
+        # 2a. Attention-decoder branch
+        if self.ctc_weight != 1.0:
+            if not self.add_copy_loss:
+                loss_att, acc_att = self._calc_att_loss(encoder_out, 
+                                                    dec_input_ids, text_lengths, labels, 
+                                                    context, need_att_mask)
+            else:
+                # TODO
+                loss_att, loss_copy, acc_att = self._calc_att_loss(encoder_out, 
+                                                    dec_input_ids, text_lengths, labels, 
+                                                    context, need_att_mask, att_tgt)
+        else:
+            loss_att = None
+
+        # 2b. CTC branch
+        if self.ctc_weight != 0.0:
+            loss_ctc = self.ctc(encoder_out, encoder_out_lens, text,
+                                text_lengths)
+        else:
+            loss_ctc = None
+
+        if loss_ctc is None:
+            loss = loss_att
+        elif loss_att is None:
+            loss = loss_ctc
+        else:
+            loss = self.ctc_weight * loss_ctc + (1 -
+                                                 self.ctc_weight) * loss_att
+        
+        if not self.add_copy_loss:
+            return loss, loss_att, loss_ctc
+        else:
+            loss = loss + 0.5 * loss_copy
+            return loss, loss_att, loss_ctc, loss_copy
+    
+    def _calc_att_loss(
+        self,
+        encoder_out: torch.Tensor,
+        dec_input_ids: torch.Tensor,
+        ys_pad_lens: torch.Tensor,
+        labels: torch.Tensor,
+        context=None,
+        need_att_mask=None,
+        att_tgt=None,
+    ) -> Tuple[torch.Tensor, float]:
+
+        ys_in_pad, ys_out_pad = dec_input_ids, labels
+        # ys_in_lens = ys_pad_lens + 4
+
+        if not self.add_context_att:
+            decoder_out = self.decoder(ys_in_pad, encoder_out,
+                                    context, need_att_mask,
+                                    )
+        else:
+            need_att_mask = ys_in_pad.ne(self.eot)
+            # need_att_mask[:, 0] = True
+            if not self.add_copy_loss:
+                decoder_out = self.decoder(ys_in_pad, encoder_out, 
+                                            context, need_att_mask,
+                                            )
+            else:
+                decoder_out, att_p = self.decoder(ys_in_pad, encoder_out, 
+                                                context, need_att_mask,
+                                                )
+                # Compute copy attention loss
+                # att_p: [batch_size, max_len, n], att_tgt: [batch_size, max_len]
+                loss_copy = -torch.gather(att_p[need_att_mask], -1, att_tgt[need_att_mask].unsqueeze(-1)).log().sum() / need_att_mask.shape[0]
+
+        # 2. Compute attention loss
+        loss_att = self.criterion_att(decoder_out, ys_out_pad)
+        acc_att = th_accuracy(
+            decoder_out.view(-1, self.vocab_size),
+            ys_out_pad,
+            ignore_label=self.ignore_id,
+        )
+        if not self.add_copy_loss:
+            return loss_att, acc_att
+        else:
+            return loss_att, loss_copy, acc_att
+    
     @property
     def device(self):
         return next(self.parameters()).device

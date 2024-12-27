@@ -27,9 +27,9 @@ from utils import (
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
+# os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertTokenizer, BertModel
 
@@ -180,8 +180,6 @@ class WhisperTextModule(LightningModule):
                                         dropout_rate=cfg.dropout_rate,
                                         add_gated_x_attn=cfg.add_gated_x_attn,
                                         bert_encoder=cfg.bert_encoder,
-                                        add_resnet= cfg.add_resnet,
-                                        num_resnet_layer=cfg.num_resnet_layer,
                                         mode = cfg.mode,
                                         )
         
@@ -577,16 +575,13 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
         logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
         val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-        # val_check_interval=cfg.validate_every_n_batches, # validate after this number batches
         check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
         reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-        # gradient_clip_val=1, # TODO: add as config variable?
         use_distributed_sampler=False, # implemented custom distributed trainer
         sync_batchnorm=True,
     )

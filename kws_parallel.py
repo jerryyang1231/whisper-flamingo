@@ -138,37 +138,26 @@ class TextEncoder(nn.Module):
         self.fc_sigma = nn.Linear(hidden_dim, self.d_model)
 
     def forward(self, tokenized_keyword):
-        # tokenized_keyword: [batch_size, max_keywords_per_sample, max_keyword_token_len]
-        batch_size, max_keywords, max_len = tokenized_keyword.shape
-        
-        # 初始化輸出
-        mu_v_list, sigma_v_list = [], []
-        
-        for i in range(max_keywords):
-            # 1. 取出每個關鍵字序列
-            keyword_seq = tokenized_keyword[:, i, :]  # [batch_size, max_keyword_token_len]
-            
-            # 2. Embedding 層
-            emb = self.embedding(keyword_seq)  # [batch_size, max_keyword_token_len, embed_dim]
-            
-            # 3. LSTM 層
-            _, (h, _) = self.lstm(emb)  # h: [num_layers, batch_size, hidden_dim]
-            
-            # 4. 取出最後一層的隱藏狀態
-            h_final = h[-1]  # [batch_size, hidden_dim]
-            
-            # 5. 生成 mu 和 sigma
-            mu_v = self.fc_mu(h_final)  # [batch_size, d_model]
-            sigma_v = self.fc_sigma(h_final)  # [batch_size, d_model]
+        # tokenized_keyword: [B, K, L]
+        B, K, L = tokenized_keyword.shape
 
-            # 6. 加入列表
-            mu_v_list.append(mu_v)
-            sigma_v_list.append(sigma_v)
-        
-        # 7. 堆疊結果
-        mu_v = torch.stack(mu_v_list, dim=1)  # [batch_size, max_keywords_per_sample, d_model]
-        sigma_v = torch.stack(sigma_v_list, dim=1)  # [batch_size, max_keywords_per_sample, d_model]
-        
+        # 1. 展開到 [B*K, L]
+        flattened = tokenized_keyword.view(B*K, L)
+
+        # 2. Embedding: [B*K, L, embed_dim]
+        emb = self.embedding(flattened)
+
+        # 3. LSTM: 一次性 forward
+        _, (h, _) = self.lstm(emb)  # h: [num_layers, B*K, hidden_dim]
+        h_final = h[-1]            # [B*K, hidden_dim]
+
+        # 4. 分別產生 mu_v, sigma_v
+        mu_v = self.fc_mu(h_final)      # [B*K, d_model]
+        sigma_v = self.fc_sigma(h_final)
+
+        # 5. reshape 回 [B, K, d_model]
+        mu_v = mu_v.view(B, K, -1)
+        sigma_v = sigma_v.view(B, K, -1)
         return mu_v, sigma_v
 
 class AdaIN(nn.Module):
