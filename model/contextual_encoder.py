@@ -203,7 +203,6 @@ class SimpleAttention(nn.Module):
     def forward(self, d_h, c_h, need_att_mask, preatt=None):
         batch_size, max_len = d_h.shape[0], d_h.shape[1]
         n_v, c_dim = c_h.shape[0], c_h.shape[1]
-        
         # 確保所有張量使用相同的數據類型
         dtype = d_h.dtype
         device = d_h.device

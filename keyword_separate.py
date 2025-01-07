@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import yaml
 import types
 import numpy as np
@@ -29,12 +30,11 @@ from utils import (
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
+os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
-import json
 
 # my command
 # python -u keyword_separate.py config/audio-text/at_taigi_small_keyword_separate.yaml
@@ -166,8 +166,6 @@ class WhisperTextModule(LightningModule):
                                         dropout_rate=cfg.dropout_rate,
                                         add_gated_x_attn=cfg.add_gated_x_attn,
                                         bert_encoder = cfg.bert_encoder,
-                                        add_resnet= cfg.add_resnet,
-                                        num_resnet_layer=cfg.num_resnet_layer,
                                         mode = cfg.mode,
                                         )
         

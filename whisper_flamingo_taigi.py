@@ -5,14 +5,13 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset  # 載入 Hugging Face 的 datasets
+from datasets import load_dataset 
 from torch.utils.data import Dataset
 import pandas as pd
 import whisper
 import argparse
 from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
-# from pytorch_lightning.cli import LightningCLI
 from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
@@ -34,11 +33,7 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
 # python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small.yaml
-# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-4.yaml
-# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-8.yaml
-# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-16.yaml
-# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-32.yaml
-# CUDA_VISIBLE_DEVICES=2 python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_ResNet-64.yaml
+# python -u whisper_flamingo_taigi.py config/audio-text/at_taigi_small_pilot_exp.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -76,7 +71,6 @@ class YTTDTaigiTRSDataset(Dataset):
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
-        # self.n_ctx = 448
 
     def __len__(self):
         return len(self.dataset)
@@ -130,10 +124,7 @@ class YTTDTaigiTRSDataset(Dataset):
                             self.tokenizer.special_tokens["<|{}|>".format(lang)],
                             self.tokenizer.transcribe, 
                             self.tokenizer.no_timestamps] + \
-                            self.tokenizer.encode(" " + mandarin_text)
-        # 截斷 translated_text 以符合 self.n_ctx 的限制
-        # if len(translated_text) > self.n_ctx:
-        #     translated_text = translated_text[:self.n_ctx]    
+                            self.tokenizer.encode(" " + mandarin_text)   
         
         # 將 translated_text 轉換為 NumPy array 並且轉換為 float32
         mandarin_text = np.array(mandarin_text).astype(np.float32)
@@ -156,8 +147,7 @@ class WhisperTextModule(LightningModule):
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                         dropout_rate=cfg.dropout_rate,
                                         add_gated_x_attn=cfg.add_gated_x_attn,
-                                        add_resnet= cfg.add_resnet,
-                                        num_resnet_layer=cfg.num_resnet_layer,
+                                        mode = cfg.mode,
                                         )
             
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
@@ -174,13 +164,7 @@ class WhisperTextModule(LightningModule):
                 self.model.load_state_dict(state_dict_updated, strict=False) 
                 
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
-
-        # if 'large' in self.model_name: # only decoder training
-        #     for p in self.model.encoder.parameters():
-        #         p.requires_grad = False
-
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
-
         self.cfg = cfg        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
@@ -195,15 +179,7 @@ class WhisperTextModule(LightningModule):
         dec_input_ids = batch["dec_input_ids"].long()
         translated_text = batch["translated_text"].long()
 
-        # if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
-        #     for p in self.model.encoder.parameters():
-        #         p.requires_grad = False
-
-        # if 'large' in self.model_name: # only decoder training, NOTE: be careful with linear layer here
-        #     with torch.no_grad():
-        #         features, x_v = self.model.encoder(input_ids, video, training=True)
-        # else:
-        features = self.model.encoder(input_ids, training=True)
+        features = self.model.encoder(input_ids)
 
         out = self.model.decoder(dec_input_ids, features, xt_1=translated_text)
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
@@ -367,12 +343,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            # name="whisper-flamingo taigi small ",
-            # name="whisper-flamingo taigi small + ResNet-4 ",
-            # name="whisper-flamingo taigi small + ResNet-8 ",
-            # name="whisper-flamingo taigi small + ResNet-16 ",
-            name="whisper-flamingo taigi small + ResNet-32 ",
-            # name="whisper-flamingo taigi small + ResNet-64 ",
+            name="whisper-flamingo taigi small ",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -394,16 +365,13 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
         logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
         val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-        # val_check_interval=cfg.validate_every_n_batches, # validate after this number batches
         check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
         reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-        # gradient_clip_val=1, # TODO: add as config variable?
         use_distributed_sampler=False, # implemented custom distributed trainer
         sync_batchnorm=True,
     )

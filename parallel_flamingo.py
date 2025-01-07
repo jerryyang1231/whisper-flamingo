@@ -5,7 +5,7 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset  # 載入 Hugging Face 的 datasets
+from datasets import load_dataset
 from torch.utils.data import Dataset
 import pandas as pd
 import whisper

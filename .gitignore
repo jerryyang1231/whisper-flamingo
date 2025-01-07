@@ -14,3 +14,7 @@ decode/
 experiments
 wandb
 slurm/train_text_slurm
+profiler
+tmp
+plot
+keyword_exp

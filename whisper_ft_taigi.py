@@ -5,7 +5,7 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset  # 載入 Hugging Face 的 datasets
+from datasets import load_dataset
 from torch.utils.data import Dataset
 import whisper
 from pytorch_lightning import LightningModule, Trainer, seed_everything
@@ -22,6 +22,7 @@ from utils import (
 from utils_batch_samplers import SortedBatchSampler
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
+os.environ["WANDB_MODE"] = "disabled" 
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from whisper.normalizers.basic import BasicTextNormalizer
 
@@ -312,10 +313,10 @@ print(cfg)
 print("audio max length: {}".format(cfg.audio_max_length))
 
 # Initialize WandB
-# wandb.init(project="whisper-flamingo",
-#            config=cfg,
-#            name="whisper small finetune on yttd_taigi_trs (num_train_steps = 80k, warmup_steps = 8k)",
-# )
+wandb.init(project="whisper-flamingo",
+           config=cfg,
+           name="whisper small finetune on yttd_taigi_trs (num_train_steps = 80k, warmup_steps = 8k)",
+)
 
 tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
                                                                                     cfg.check_output_dir, 
@@ -326,15 +327,14 @@ tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taig
 model = WhisperModelModule(cfg, cfg.model_name, cfg.lang)
 
 # Create a WandB logger instance
-# wandb_logger = WandbLogger()
+wandb_logger = WandbLogger()
 
 trainer = Trainer(
     precision=cfg.precision,
     accelerator="gpu",
     max_steps=cfg.num_train_steps,
     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    # logger=wandb_logger,
-    logger=tflogger,
+    logger=wandb_logger,
     callbacks=callback_list,
     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
     devices=cfg.num_devices,
@@ -353,4 +353,4 @@ else:
     # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
 # End the WandB run
-# wandb.finish()
+wandb.finish()

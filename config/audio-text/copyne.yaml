@@ -10,10 +10,10 @@ num_devices: 1
 precision: 16-mixed
 
 model_name: small
-learning_rate: 5.0e-5
-batch_size: 8
-num_train_steps: 180000
-warmup_steps: 30000
+learning_rate: 1.25e-5  # small
+batch_size: 4
+num_train_steps: 80000
+warmup_steps: 8000
 gradient_accumulation_steps: 1
 
 monitor: 'val/cer_at'  
@@ -26,8 +26,8 @@ dropout_rate: 0
 lang: zh
 resume_training: False
 
-pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
-train_id: copyne
+pt_ckpt: ''
+train_id: simplified_copyne
 
 # text
 add_gated_x_attn: 0 # 0 for False, 1 for True
@@ -36,13 +36,13 @@ mode: ""
 sequential_gated_x_attn: False # False for parallel flamingo
 
 # copyne
-add_copy_loss: true
+add_copy_loss: false
 
 # decoder related
 decoder_conf:
     contextual_att: true
     att_type: 'simpleatt'
-    add_copy_loss: true
+    add_copy_loss: false
     cocoder_out_dim: 512
 
 # hybrid CTC/attention
@@ -57,7 +57,7 @@ model_conf:
         hidden_size: 512
         num_layers: 3
         dropout: 0.1
-        pad_idx: -1
+        pad_idx: 50257
         bidirectional: false
 
 log_output_dir: "slurm/train_text_slurm"

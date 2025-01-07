@@ -1,0 +1,65 @@
+train_name: whisper
+audio_max_length: 160000 # 10 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 1000
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 5.0e-5
+batch_size: 8
+num_train_steps: 180000
+warmup_steps: 30000
+gradient_accumulation_steps: 1
+
+monitor: 'val/cer_at'  
+noise_prob: 0.0
+noise_snr_train: 0
+
+spec_augment: ""
+dropout_rate: 0 
+
+lang: zh
+resume_training: False
+
+pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
+train_id: simplified_copyne_ft_decoder
+
+# text
+add_gated_x_attn: 0 # 0 for False, 1 for True
+bert_encoder: False
+mode: ""
+sequential_gated_x_attn: False # False for parallel flamingo
+
+# copyne
+add_copy_loss: false
+
+# decoder related
+decoder_conf:
+    contextual_att: true
+    att_type: 'simpleatt'
+    add_copy_loss: false
+    cocoder_out_dim: 512
+
+# hybrid CTC/attention
+model_conf:
+    ctc_weight: 0.3
+    lsm_weight: 0.1     # label smoothing option
+    length_normalized_loss: false
+    add_context_att: true
+    add_null_context: true
+    concoder_cofig:
+        input_size: 256
+        hidden_size: 512
+        num_layers: 6
+        dropout: 0.1
+        pad_idx: 50257
+        bidirectional: false
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-cer_at={val/cer_at:.4f}"

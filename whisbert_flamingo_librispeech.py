@@ -36,6 +36,7 @@ from transformers import BertTokenizer, BertModel
 # my command
 # python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn_small_bert.yaml
 # python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-deu_small_bert.yaml
+# python -u whisbert_flamingo_librispeech.py config/audio-text/at_en-cmn+en-deu_small_bert.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -198,10 +199,6 @@ class WhisperTextModule(LightningModule):
                 
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
 
-        # if 'large' in self.model_name: # only decoder training
-        #     for p in self.model.encoder.parameters():
-        #         p.requires_grad = False
-
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
         self.cfg = cfg
@@ -225,7 +222,7 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translation_1 = batch["translation_1"]  # 保持為文本列表
+        translation_1 = batch["translation_1"] 
         
         # 檢查 batch 中是否有 translation_2，沒有則設為 None
         bert_hidden_states_2 = None
@@ -264,11 +261,7 @@ class WhisperTextModule(LightningModule):
             for p in self.model.encoder.parameters():
                 p.requires_grad = False
 
-        # if 'large' in self.model_name: # only decoder training, NOTE: be careful with linear layer here
-        #     with torch.no_grad():
-        #         features, x_v = self.model.encoder(input_ids, video, training=True)
-        # else:
-        features = self.model.encoder(input_ids, training=True)
+        features = self.model.encoder(input_ids)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
         out = self.model.decoder(dec_input_ids, features, xt_1=bert_hidden_states_1, xt_2=bert_hidden_states_2)
@@ -318,7 +311,7 @@ class WhisperTextModule(LightningModule):
             # 通過 BERT 模型獲取輸出
             bert_outputs_2 = self.bert_model(**bert_inputs_2)
             bert_hidden_states_2 = bert_outputs_2.last_hidden_state  # [batch_size, seq_len, hidden_size]
-        
+
         # 初始化要存儲結果的列表
         o_list, l_list = [], []
 
@@ -426,8 +419,8 @@ class WhisperTextModule(LightningModule):
                                       noise_prob=cfg.noise_prob,
                                       train=True,
                                       noise_snr=cfg.noise_snr_train,
-                                    #   translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
-                                      translation_base_dirs=[cfg.translation_base_dirs[0]]
+                                      translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
+                                    #   translation_base_dirs=[cfg.translation_base_dirs[0]]
                                       )  
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -452,8 +445,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                # translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
-                                translation_base_dirs=[cfg.translation_base_dirs[0]]
+                                translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
+                                # translation_base_dirs=[cfg.translation_base_dirs[0]]
                                 )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -475,8 +468,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                # translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
-                                translation_base_dirs=[cfg.translation_base_dirs[0]]
+                                translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
+                                # translation_base_dirs=[cfg.translation_base_dirs[0]]
                                 )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -498,8 +491,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                # translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
-                                translation_base_dirs=[cfg.translation_base_dirs[0]]
+                                translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
+                                # translation_base_dirs=[cfg.translation_base_dirs[0]]
                                 )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -521,8 +514,8 @@ class WhisperTextModule(LightningModule):
                                 spec_augment=False,
                                 noise_prob=0,
                                 train=False,
-                                # translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
-                                translation_base_dirs=[cfg.translation_base_dirs[0]]
+                                translation_base_dirs=[cfg.translation_base_dirs[0], cfg.translation_base_dirs[1]]
+                                # translation_base_dirs=[cfg.translation_base_dirs[0]]
                                 )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -547,8 +540,9 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo en-cmn small",
+            # name="whisbert-flamingo en-cmn small",
             # name="whisbert-flamingo en-deu small",
+            name="whisbert-flamingo en-cmn+en-deu small",
     )
     
     tflogger, callback_list = setup_logging_and_checkpoint_librispeech(cfg.log_output_dir, 

@@ -175,6 +175,84 @@ class WhisperDataCollatorWhithPadding_taigi:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
 
         return batch
+
+class keyword_prompt_collator:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, wav_lens, prompt_lens = [], [], [], [], []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            wav_lens.append(f["wav_lens"])
+            prompt_lens.append(f["prompt_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0)
+                    for audio, audio_len in zip(input_ids, audio_lengths)]
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                    for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                        for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "wav_lens": wav_lens,
+            "prompt_lens": prompt_lens,
+        }
+
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "prompt_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
+    
+class keyword_prompt_translation_collator:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, wav_lens, prompt_lens, translations = [], [], [], [], [], []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            wav_lens.append(f["wav_lens"])
+            prompt_lens.append(f["prompt_lens"])
+            translations.append(f["translations"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0)
+                    for audio, audio_len in zip(input_ids, audio_lengths)]
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                    for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                        for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "wav_lens": wav_lens,
+            "prompt_lens": prompt_lens,
+            "translations": translations,
+        }
+
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "prompt_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
     
 class copyne_collate_fn:
     def __init__(self, tokenizer):
@@ -217,7 +295,7 @@ class copyne_collate_fn:
     
         batch_ne_lst = sorted(list(batch_ne_set), key=lambda x: len(x), reverse=True)
         context_tensor = build_ne_vocab_tensor_with_tokenizer(batch_ne_lst, self.tokenizer)
-        att_tgt = pad([build_copy_tgt(sent, batch_ne_lst) for sent in raw_sentence_lst], padding_value=50257)
+        att_tgt = pad([build_copy_tgt(sent, batch_ne_lst) for sent in raw_sentence_lst], padding_value=-100)
 
         batch = {
             "input_ids": input_ids,
@@ -487,7 +565,7 @@ class WhisperTextCollatorWhithPadding_taigi_with_bert:
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "translations": translations,
-            "wav_lens": wav_lens  # Add wav_lens to the batch
+            "wav_lens": wav_lens,
         }
         
         # 只將數值類型的項目轉換為張量
@@ -498,12 +576,13 @@ class WhisperTextCollatorWhithPadding_taigi_with_bert:
 
 class WhisperTextCollatorWhithPadding_taigi_mix:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, translations, keywords, wav_lens = [], [], [], [], [], []
+        # input_ids, labels, dec_input_ids, translations, keywords, wav_lens = [], [], [], [], [], []
+        input_ids, labels, dec_input_ids, keywords, wav_lens = [], [], [], [], []
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
-            translations.append(f["translation"])
+            # translations.append(f["translation"])
             keywords.append(f["keywords"])
             wav_lens.append(f["wav_lens"])
 
@@ -533,8 +612,8 @@ class WhisperTextCollatorWhithPadding_taigi_mix:
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "keywords": keywords,
-            "translations": translations,
-            "wav_lens": wav_lens  # Add wav_lens to the batch
+            # "translations": translations,
+            "wav_lens": wav_lens 
         }
         
         # 只將數值類型的項目轉換為張量
@@ -543,58 +622,58 @@ class WhisperTextCollatorWhithPadding_taigi_mix:
 
         return batch
     
-class WhisperTextCollatorWhithPadding_taigi_cls:
-    def __call__(self, features):
-        input_ids, labels, dec_input_ids, translations, grouped_keywords, wav_lens= [], [], [], [], [], []
-        mandarin_words = []  # 初始化 mandarin_words 為空列表
+# class WhisperTextCollatorWhithPadding_taigi_cls:
+#     def __call__(self, features):
+#         input_ids, labels, dec_input_ids, translations, grouped_keywords, wav_lens= [], [], [], [], [], []
+#         mandarin_words = []  # 初始化 mandarin_words 為空列表
         
-        # 檢查 features 中是否包含 "mandarin_words" 欄位
-        has_mandarin_words = "mandarin_words" in features[0]
+#         # 檢查 features 中是否包含 "mandarin_words" 欄位
+#         has_mandarin_words = "mandarin_words" in features[0]
         
-        for f in features:
-            input_ids.append(f["input_ids"])
-            labels.append(f["labels"])
-            dec_input_ids.append(f["dec_input_ids"])
-            translations.append(f["translations"])
-            grouped_keywords.append(f["grouped_keywords"])
-            wav_lens.append(f["wav_lens"])
+#         for f in features:
+#             input_ids.append(f["input_ids"])
+#             labels.append(f["labels"])
+#             dec_input_ids.append(f["dec_input_ids"])
+#             translations.append(f["translations"])
+#             grouped_keywords.append(f["grouped_keywords"])
+#             wav_lens.append(f["wav_lens"])
             
-            # 如果有 "mandarin_words"，則加入列表
-            if has_mandarin_words:
-                mandarin_words.append(f["mandarin_words"])        
+#             # 如果有 "mandarin_words"，則加入列表
+#             if has_mandarin_words:
+#                 mandarin_words.append(f["mandarin_words"])        
         
-        audio_lengths = [audio.shape[1] for audio in input_ids]
-        max_audio_len = max(audio_lengths)
-        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+#         audio_lengths = [audio.shape[1] for audio in input_ids]
+#         max_audio_len = max(audio_lengths)
+#         input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
 
-        label_lengths = [len(lab) for lab in labels]
-        dec_input_ids_length = [len(e) for e in dec_input_ids]
-        max_label_len = max(label_lengths + dec_input_ids_length)
+#         label_lengths = [len(lab) for lab in labels]
+#         dec_input_ids_length = [len(e) for e in dec_input_ids]
+#         max_label_len = max(label_lengths + dec_input_ids_length)
 
-        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
-        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
-                  for lab, lab_len in zip(labels, label_lengths)]
-        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
-                         for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
+#         # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+#         labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+#                   for lab, lab_len in zip(labels, label_lengths)]
+#         dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+#                          for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
         
-        batch = {
-            "input_ids": input_ids,
-            "labels": labels,
-            "dec_input_ids": dec_input_ids,
-            "grouped_keywords": grouped_keywords,
-            "translations": translations,
-            "wav_lens": wav_lens,  # Add wav_lens to the batch
-        }
+#         batch = {
+#             "input_ids": input_ids,
+#             "labels": labels,
+#             "dec_input_ids": dec_input_ids,
+#             "grouped_keywords": grouped_keywords,
+#             "translations": translations,
+#             "wav_lens": wav_lens,  # Add wav_lens to the batch
+#         }
         
-        # 只有在 features 包含 "mandarin_words" 時才加入 batch
-        if has_mandarin_words:
-            batch["mandarin_words"] = mandarin_words
+#         # 只有在 features 包含 "mandarin_words" 時才加入 batch
+#         if has_mandarin_words:
+#             batch["mandarin_words"] = mandarin_words
         
-        # 只將數值類型的項目轉換為張量
-        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
-            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+#         # 只將數值類型的項目轉換為張量
+#         for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
+#             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
 
-        return batch
+#         return batch
 
 class WhisperTextCollatorWhithPadding_librispeech_without_bert:
     def __call__(self, features):
@@ -730,35 +809,20 @@ def create_padding_mask(T, padding_amounts):
     mask = padded_lens <= torch.arange(T, dtype=torch.long)[None, :]  # Add a dimension for broadcasting
     return mask
 
-def whisper_optimizer(model, cfg, t_total, video=True):
+def whisper_optimizer(model, cfg, t_total):
     no_decay = ["bias", "LayerNorm.weight"]
-    projection = ["video_projection"] # linear layer and scalar
-    if video and cfg.video_projection_separate_lr != '': # ft video projection separate lr
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in model.named_parameters()
-                            if not any(nd in n for nd in projection)],
-                "lr": cfg.learning_rate,
-            },
-            {
-                "params": [p for n, p in model.named_parameters()
-                            if any(nd in n for nd in projection)],
-                "lr": cfg.video_projection_separate_lr,
-            },
-        ]
-    else:
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in model.named_parameters()
-                            if not any(nd in n for nd in no_decay)],
-                "weight_decay": cfg.weight_decay,
-            },
-            {
-                "params": [p for n, p in model.named_parameters()
-                            if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters()
+                        if not any(nd in n for nd in no_decay)],
+            "weight_decay": cfg.weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters()
+                        if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
     optimizer = AdamW(optimizer_grouped_parameters,
                         lr=cfg.learning_rate,
                         eps=cfg.adam_epsilon)
@@ -829,6 +893,27 @@ def AdaKWS_optimizer(model, cfg, t_total):
     return optimizer, scheduler
 
 def whisper_flamingo_optimizer(model, cfg, t_total):
+    x_attn = ["gated_x_attn", "attn_gate", "ff", "keyword_cross_attn"]
+
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters()
+                        if any(nd in n for nd in x_attn )],
+            "lr": cfg.learning_rate,
+        },
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters,
+                        lr=cfg.learning_rate,
+                        eps=cfg.adam_epsilon,
+                        weight_decay=cfg.weight_decay)
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=cfg.warmup_steps,
+        num_training_steps=t_total
+    )
+    return optimizer, scheduler
+
+def whisper_copyne_optimizer(model, cfg, t_total):
     x_attn = ["gated_x_attn", "attn_gate", "ff", "keyword_cross_attn"]
 
     optimizer_grouped_parameters = [
@@ -962,7 +1047,7 @@ def setup_logging_and_checkpoint_librispeech(log_output_dir, check_output_dir, t
         filename=filename,
         monitor=monitor,
         mode='min',
-        save_top_k=1,
+        save_top_k=3,
         auto_insert_metric_name=False,
     )
 
@@ -1127,9 +1212,8 @@ def build_ne_vocab_tensor_with_tokenizer(ne_lst, tokenizer):
     for ne in ne_lst:
         token_ids = tokenizer.encode(ne)
         res.append(torch.tensor(token_ids, dtype=torch.long))
-
     # 2. 使用 pad 函數填充
-    return pad(res, padding_value=-1)
+    return pad(res, padding_value=50257)
 
 def build_copy_tgt(sentence, ne_lst):
     res = [len(ne_lst)] * (len(sentence)+1)
@@ -1139,4 +1223,5 @@ def build_copy_tgt(sentence, ne_lst):
             if res[st] != len(ne_lst):
                 continue
             res[st] = idx
+    res = [len(ne_lst)] * 5 + res
     return torch.tensor(res, dtype=torch.int64)

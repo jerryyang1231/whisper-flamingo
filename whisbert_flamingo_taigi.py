@@ -5,7 +5,7 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset  # 載入 Hugging Face 的 datasets
+from datasets import load_dataset
 from torch.utils.data import Dataset
 import pandas as pd
 import whisper
@@ -29,7 +29,7 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+os.environ["WANDB_MODE"] = "disabled" 
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 
@@ -86,8 +86,8 @@ class YTTDTaigiTRSDataset(Dataset):
         mandarin_text = item['text_mandarin']
         wav_lens = len(wav_data)
 
-        text = text.replace(" ", "")
         text = self.text_normalizer(text)
+        text = text.replace(" ", "")
         
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
@@ -138,11 +138,13 @@ class WhisperTextModule(LightningModule):
                                         dropout_rate=cfg.dropout_rate,
                                         add_gated_x_attn=cfg.add_gated_x_attn,
                                         bert_encoder = cfg.bert_encoder,
-                                        add_resnet= cfg.add_resnet,
-                                        num_resnet_layer=cfg.num_resnet_layer,
                                         mode = cfg.mode,
                                         )
-        
+
+        if cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
+            for p in self.model.encoder.parameters():
+                p.requires_grad = False
+
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
             state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
@@ -155,10 +157,9 @@ class WhisperTextModule(LightningModule):
                 # print(str(e))
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
-                
+
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
-
         self.cfg = cfg        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
@@ -172,7 +173,6 @@ class WhisperTextModule(LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_id):
-        
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
@@ -190,16 +190,8 @@ class WhisperTextModule(LightningModule):
         # 通過 BERT 模型獲取輸出
         bert_outputs = self.bert_model(**bert_inputs)
         translation_embeddings = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
-        
-        if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
-            for p in self.model.encoder.parameters():
-                p.requires_grad = False
 
-        # if 'large' in self.model_name: # only decoder training, NOTE: be careful with linear layer here
-        #     with torch.no_grad():
-        #         features, x_v = self.model.encoder(input_ids, video, training=True)
-        # else:
-        features = self.model.encoder(input_ids, training=True)
+        features = self.model.encoder(input_ids)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
         out = self.model.decoder(dec_input_ids, features, xt_1=translation_embeddings)
@@ -210,7 +202,6 @@ class WhisperTextModule(LightningModule):
         return loss
             
     def validation_step(self, batch, batch_id, dataloader_idx=None):
-        
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
@@ -261,7 +252,7 @@ class WhisperTextModule(LightningModule):
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0
                            
-            o_list, o_list_full, l_list, l_list_full = [], [], [], []
+            o_list, l_list = [], []
             for o, l in zip(tokens, labels):
                 # 解碼並過濾掉特殊標籤
                 decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
@@ -281,9 +272,7 @@ class WhisperTextModule(LightningModule):
             for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
                 print("="*100)
                 print("PRED: {}".format(hypo))
-                # print(hypo_full)
                 print("REF:  {}".format(ref))
-                # print(ref_full)
                 if i == 1: break
             
             log_prefix = {0: 'val', 1: 'test'}
@@ -379,7 +368,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small reproduce_3",
+            name="whisbert-flamingo taigi small reproduce (lr=5.0e-5)",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -401,16 +390,13 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
         logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
         val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-        # val_check_interval=cfg.validate_every_n_batches, # validate after this number batches
         check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
         reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-        # gradient_clip_val=1, # TODO: add as config variable?
         use_distributed_sampler=False, # implemented custom distributed trainer
         sync_batchnorm=True,
     )

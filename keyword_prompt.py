@@ -1,6 +1,7 @@
 import os
 import sys
 import yaml
+import json
 import types
 import numpy as np
 import torch
@@ -18,7 +19,7 @@ from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
-    WhisperDataCollatorWhithPadding_taigi,
+    keyword_prompt_collator,
     whisper_optimizer,
     setup_logging_and_checkpoint_taigi,
     wer_cer,
@@ -32,10 +33,9 @@ from pytorch_lightning.loggers import WandbLogger
 os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
-import json
 
 # my command
-# python -u keyword_prompt.py config/audio-text/at_taigi_small_keyword_prompt.yaml
+# python -u keyword_prompt.py config/audio-text/keyword_prompt.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -93,7 +93,7 @@ class YTTDTaigiTRSDataset(Dataset):
         all_keywords = get_all_keywords(mandarin_text, self.dictionary)
         all_keywords = [self.text_normalizer(word).replace(" ", "") for word in all_keywords]
         filtered_keywords = [word for word in all_keywords if word in text]
-        
+
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
         else: # 加噪音
@@ -150,7 +150,12 @@ class WhisperTextModule(LightningModule):
                                         mode = cfg.mode,
                                         sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         )
-        
+
+        # freeze whisper encoder gradients for prompt
+        if cfg.prompt != 0:
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
+
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
             state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
@@ -163,7 +168,7 @@ class WhisperTextModule(LightningModule):
                 # print(str(e))
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
-                
+
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -176,16 +181,11 @@ class WhisperTextModule(LightningModule):
         return self.model(x)
 
     def training_step(self, batch, batch_id):
-        
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        
-        if self.cfg.prompt != 0: # freeze whisper encoder gradients for prompt
-            for p in self.model.encoder.parameters():
-                p.requires_grad = False
 
-        audio_features = self.model.encoder(input_ids, training=True)
+        audio_features = self.model.encoder(input_ids)
 
         out = self.model.decoder(dec_input_ids, audio_features)
         
@@ -214,18 +214,24 @@ class WhisperTextModule(LightningModule):
             tokens = torch.argmax(out, dim=2)
 
             # Set all decoder predictions after first eot to eot
-            # TODO: fix for large-v3, which predicts <eot> in the beginning
-            eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-                    
-            # 針對每個序列進行檢查
-            for i in range(eot_find.shape[0]):
-                # 找出所有 eot 的位置
-                eot_positions = (tokens[i] == self.tokenizer.eot).nonzero(as_tuple=False)
-                
-                if eot_positions.numel() > 3:  # 確保有至少 4 個 eot
-                    # 從第 4 個 eot 開始，將後續 token 設置為 eot
-                    fourth_eot = eot_positions[3].item()  # 第 4 個 eot 的索引
-                    tokens[i, fourth_eot + 1:] = self.tokenizer.eot
+            for i in range(tokens.size(0)):
+                pl = prompt_lens[i].item()  # prompt_lens[i] 是當前樣本的prompt長度
+                # 對 tokens[i, pl:] 這段進行 EOT 搜尋
+                eot_positions = (tokens[i, pl:] == self.tokenizer.eot).nonzero(as_tuple=False)
+                if eot_positions.numel() > 0:
+                    # 檢查第一個元素是否為 0
+                    if eot_positions[0].item() == 0:
+                        if eot_positions.size(0) > 1:
+                            # 若有第二個元素，使用第二個位置
+                            first_eot = pl + eot_positions[1].item()
+                        else:
+                            # 若沒有第二個元素，跳過此次處理
+                            continue
+                    else:
+                        # 正常使用第一個元素
+                        first_eot = pl + eot_positions[0].item()
+                    # 從 first_eot+1 開始填上 eot (50257) 避免 decode 到 padding 區
+                    tokens[i, first_eot + 1:] = self.tokenizer.eot
 
             # 計算準確率，忽略 -100 的位置
             mask = (labels != -100) & (labels != self.tokenizer.eot)
@@ -239,11 +245,11 @@ class WhisperTextModule(LightningModule):
 
             # 計算 WER 和 CER
             o_list, l_list = [], []
-            for idx, (o, l, prompt_len) in enumerate(zip(tokens, labels, prompt_lens)):
-                prompt_len = prompt_len.item() 
+            for idx, (o, l, pl) in enumerate(zip(tokens, labels, prompt_lens)):
+                pl = pl.item()
                 
                 # 排除 prompt_ids 部分
-                o = o[prompt_len:]  
+                o = o[pl:]
                 
                 # 過濾掉特殊標籤和忽略的標籤
                 o_filtered = [t for t in o if t.item() not in self.special_token_set]
@@ -251,7 +257,6 @@ class WhisperTextModule(LightningModule):
                 
                 # 解碼
                 decoded_o = self.tokenizer.decode(o_filtered)
-                
                 decoded_l = self.tokenizer.decode(l_filtered)
                 
                 # 正規化文本並移除空格
@@ -310,7 +315,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
+                          collate_fn=keyword_prompt_collator())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -330,7 +335,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
+                          collate_fn=keyword_prompt_collator())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -350,7 +355,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperDataCollatorWhithPadding_taigi())
+                          collate_fn=keyword_prompt_collator())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -368,7 +373,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="KG-whisper",
             config=cfg,
-            name="whisper taigi small keyword prompt"
+            name="keyword prompt (learning rate = 1.0e-6)"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -390,16 +395,13 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_steps=cfg.num_train_steps,
         accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        # logger=tflogger,
         logger=wandb_logger,
         callbacks=callback_list,
         num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
         devices=cfg.num_devices,
         val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-        # val_check_interval=cfg.validate_every_n_batches, # validate after this number batches
         check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
         reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-        # gradient_clip_val=1, # TODO: add as config variable?
         use_distributed_sampler=False, # implemented custom distributed trainer
         sync_batchnorm=True,
     )

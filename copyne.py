@@ -34,6 +34,7 @@ import json
 
 # my command
 # python -u copyne.py config/audio-text/copyne.yaml
+# python -u copyne.py config/audio-text/copyne_ft_decoder.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -117,8 +118,8 @@ class YTTDTaigiTRSDataset(Dataset):
                         self.tokenizer.no_timestamps] + \
                         self.tokenizer.encode(" " + text)
 
-        raw_text_length = len(dec_input_ids) - 4 
-
+        raw_text_length = len(dec_input_ids) - 5
+        
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         
         return {
@@ -143,11 +144,8 @@ class WhisperTextModule(LightningModule):
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                         dropout_rate=cfg.dropout_rate,
                                         add_gated_x_attn=cfg.add_gated_x_attn,
-                                        bert_encoder = cfg.bert_encoder,
-                                        mode = cfg.mode,
-                                        add_copy_loss = cfg.add_copy_loss,
-                                        sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         tokenizer = self.tokenizer,
+                                        add_copy_loss = cfg.add_copy_loss,
                                         ctc_weight = cfg.model_conf["ctc_weight"],
                                         lsm_weight = cfg.model_conf["lsm_weight"],
                                         length_normalized_loss = cfg.model_conf["length_normalized_loss"],
@@ -170,6 +168,10 @@ class WhisperTextModule(LightningModule):
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False) 
 
+        if cfg.model_conf["add_context_att"] != 0: # freeze whisper encoder 
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
+        
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
         self.cfg = cfg        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
@@ -183,33 +185,52 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         dec_input_ids = batch["dec_input_ids"].long()
         labels = batch["labels"].long()
+        batch_ne_lst = batch["batch_ne_lst"]
+        context_tensor = batch["context_tensor"]
+        att_tgt = batch["att_tgt"].long()
+        raw_audio_length = batch["raw_audio_length"]
+        raw_text_length = batch["raw_text_length"]
 
-        audio_features = self.model.encoder(input_ids)
+        # context = self.model.concoder(context_tensor)
+
+        # loss, loss_att, loss_ctc = self.model(
+        #                 audio_feat, raw_audio_length, dec_input_ids, raw_text_length, labels,
+        #                 context=context, att_tgt=att_tgt)
         
-        out = self.model.decoder(dec_input_ids, audio_features)
+        audio_features = self.model.encoder(input_ids)
 
-        loss = self.loss_fn(out.view(-1, out.size(-1)), padded_labels.view(-1))
+        context = self.model.concoder(context_tensor)
+
+        need_att_mask = dec_input_ids.ne(self.tokenizer.eot)
+        
+        out = self.model.decoder(dec_input_ids, audio_features, context, need_att_mask)
+        
+        loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
         
         return loss
             
     def validation_step(self, batch, batch_id, dataloader_idx=None):
-        audio_feat = batch["input_ids"]
+        input_ids = batch["input_ids"]
         dec_input_ids = batch["dec_input_ids"].long()
         labels = batch["labels"].long()
         batch_ne_lst = batch["batch_ne_lst"]
         context_tensor = batch["context_tensor"]
-        att_tgt = batch["att_tgt"]
+        att_tgt = batch["att_tgt"].long()
         raw_audio_length = batch["raw_audio_length"]
         raw_text_length = batch["raw_text_length"]
 
+        # loss, loss_att, loss_ctc, loss_copy, decoder_out = self.model(
+        #                 audio_feat, raw_audio_length, dec_input_ids, raw_text_length, labels,
+        #                 context=context, att_tgt=att_tgt)
+        
+        audio_features = self.model.encoder(input_ids)
+        
         context = self.model.concoder(context_tensor)
 
-        loss, loss_att, loss_ctc, loss_copy = self.model(
-                        audio_feat, raw_audio_length, dec_input_ids, raw_text_length, labels,
-                        context=context, att_tgt=att_tgt)
+        need_att_mask = dec_input_ids.ne(self.tokenizer.eot)
         
-        out_at = self.model.decoder(dec_input_ids, audio_features)
+        out_at = self.model.decoder(dec_input_ids, audio_features, context, need_att_mask)
         
         labels[labels == -100] = self.tokenizer.eot
         
@@ -224,7 +245,7 @@ class WhisperTextModule(LightningModule):
             # Set all decoder predictions after first eot to eot
             # TODO: fix for large-v3, which predicts <eot> in the beginning
             eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-                        
+
             # 針對每個序列進行檢查
             for i in range(eot_find.shape[0]):
                 if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
@@ -272,8 +293,15 @@ class WhisperTextModule(LightningModule):
     
     def configure_optimizers(self):
         model = self.model
+        
+        # 列出所有可訓練參數及其名稱
+        print("Trainable parameters:")
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                print(f"Name: {name}, Shape: {param.shape}, Requires Grad: {param.requires_grad}")
+        
         optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)        
-        self.optimizer, self.scheduler = optimizer, scheduler
+        self.optimizer, self.scheduler = optimizer, scheduler        
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
     def setup(self, stage=None):
@@ -359,7 +387,8 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="copyne",
             config=cfg,
-            name="copyne"
+            # name="simplified copyne"
+            name="simplified copyne ft decoder"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -398,8 +427,8 @@ if __name__ == "__main__":
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
-        trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import yaml
 import types
 import numpy as np
@@ -29,10 +30,9 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-os.environ["WANDB_MODE"] = "disabled"  # 禁用 WandB
+# os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
-import json
 from pytorch_lightning.profilers import PyTorchProfiler
 from collections import defaultdict
 import random
@@ -95,15 +95,12 @@ class YTTDTaigiTRSDataset(Dataset):
 
         all_keywords = get_all_keywords(mandarin_text, self.dictionary)
         all_keywords = [self.text_normalizer(word).replace(" ", "") for word in all_keywords]
-        
-        # 生成 `keyword_tokens`
-        # 將所有關鍵字轉換為 tokens，並使用 tokenizer 編碼
-        # keyword_tokens = [self.tokenizer.encode(" " + keyword) for keyword in all_keywords]
+
         keyword_tokens = [self.tokenizer.encode("|" + keyword) for keyword in all_keywords]
         
-        if np.random.rand() > self.noise_prob: # 不加噪音
+        if np.random.rand() > self.noise_prob:
             audio = wav_data.flatten().astype(np.float32)
-        else: # 加噪音
+        else: 
             audio = add_noise(wav_data, self.noise_fn, noise_snr=0).flatten().astype(np.float32)
         
         audio_frames = len(audio.flatten()) // 160
@@ -144,7 +141,7 @@ class WhisperTextModule(LightningModule):
                                         add_gated_x_attn=cfg.add_gated_x_attn,
                                         bert_encoder = cfg.bert_encoder,
                                         mode = cfg.mode,
-                                        sequential_gated_x_attn = cfg.sequential_gated_x_attn,
+                                        adakws_checkpoint = cfg.adakws_checkpoint
                                         )
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
@@ -246,7 +243,7 @@ class WhisperTextModule(LightningModule):
         translations = batch["translations"]
 
         # 1. Whisper encoder
-        audio_features = self.model.encoder(input_ids, training=True)
+        audio_features = self.model.encoder(input_ids)
         
         # 2. AdaKWS forward
         kws_logits = self.model.keyword_spotter(audio_features, keyword_tokens)  # [B,K,2]
@@ -402,19 +399,22 @@ class WhisperTextModule(LightningModule):
 
         for b in range(B):
             # 取出該sample所有 k_idx
-            k_idx_list = sample_dict[b]  # 該樣本的有效關鍵字索引
-            if len(k_idx_list) == 0:
-                # 沒有任何keyword
-                chosen_tokens = torch.tensor([], dtype=torch.long, device=device)
-            else:
-                # 如果超過 max_k，就隨機挑選 max_k 個
-                if len(k_idx_list) > max_k:
-                    k_idx_list = random.sample(k_idx_list, max_k)
+            k_idx_list = sample_dict[b] # 該樣本的有效關鍵字索引
+            if len(k_idx_list) > 0:
+                # 打亂 k_idx_list 順序
+                random.shuffle(k_idx_list)
                 
+                # 若超過 max_k 就取前面 max_k
+                if len(k_idx_list) > max_k:
+                    k_idx_list = k_idx_list[:max_k]
+
                 # gather shape [X, L_kw]
                 selected_tokens = keyword_tokens[b, k_idx_list, :]  # [X, L_kw]
                 # 把多個 keyword tokens concat 成一條 => [X * L_kw]
                 chosen_tokens = selected_tokens.reshape(-1)
+            else:
+                # 沒有任何 keyword
+                chosen_tokens = torch.tensor([], dtype=torch.long, device=device)
 
             # 在最前面插入 sop_id
             chosen_tokens = torch.cat([torch.tensor([sop_id], device=device), chosen_tokens], dim=0)
@@ -433,7 +433,7 @@ class WhisperTextModule(LightningModule):
     
     def configure_optimizers(self):
         model = self.model
-        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total, video=False)   
+        optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)   
         self.optimizer, self.scheduler = optimizer, scheduler
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
@@ -520,7 +520,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="KG-whisper",
             config=cfg,
-            name="kg whisper flamingo (learning rate=1.0e-6)"
+            name="kg whisper flamingo (lr=1.0e-6, max_kw=9999)"
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -534,15 +534,10 @@ if __name__ == "__main__":
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
-    
-    profiler = PyTorchProfiler(
-        export_to_chrome=True,  # 可視化結果
-        output_filename="trace_kg-whisper-flamingo.json"  # 儲存結果
-    )
+
     
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
-        # profiler=profiler,
         precision=cfg.precision,
         strategy=strategy,
         accelerator="gpu",
@@ -565,7 +560,7 @@ if __name__ == "__main__":
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
-        # trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
+        trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
         trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run

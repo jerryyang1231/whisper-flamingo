@@ -106,18 +106,10 @@ def load_model(
     adapter_dim: int = 256,
     add_gated_x_attn: int = 0,
     bert_encoder: bool = False,
-    bert_dim: int = 768,
-    mode: str = "translation",
-    sequential_gated_x_attn: bool = False,
-    tokenizer: object = None,
-    ctc_weight: float = 0.5,
-    lsm_weight: float = 0.0,
-    length_normalized_loss: bool = False,
-    add_context_att: bool = False,
-    add_null_context: bool = True,
-    add_copy_loss: bool = False,
-    concoder_cofig: dict = None,
-    decoder_conf: dict = None,
+    bert_dim: int = 768, 
+    mode: str = "",
+    sequential_gated_x_attn: bool = False, 
+    adakws_checkpoint: Optional[str] = None,
 ) -> Whisper:
     """
     Load a Whisper ASR model
@@ -165,10 +157,8 @@ def load_model(
 
     dims = ModelDimensions(**checkpoint["dims"])
     print("Whisper dropout rate : {}".format(dropout_rate))
-    model = Whisper(dims, dropout_rate, add_adapter, adapter_dim, add_gated_x_attn, 
-                    bert_encoder, bert_dim, mode, sequential_gated_x_attn, tokenizer,
-                    ctc_weight, lsm_weight, length_normalized_loss, add_context_att,
-                    add_null_context, add_copy_loss, concoder_cofig, decoder_conf
+    model = Whisper(dims, dropout_rate, add_adapter, adapter_dim, add_gated_x_attn, bert_encoder,
+                    bert_dim, mode, sequential_gated_x_attn, adakws_checkpoint,
                     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
