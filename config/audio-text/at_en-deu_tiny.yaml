@@ -1,0 +1,45 @@
+train_name: whisper
+audio_max_length: 640000  # 40 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 1000
+num_devices: 1
+precision: 16-mixed
+
+model_name: tiny
+learning_rate: 3.75e-5
+batch_size: 16
+num_train_steps: 160000
+warmup_steps: 16000
+gradient_accumulation_steps: 1
+
+monitor: 'dev-other/wer_at'  
+noise_prob: 0.0
+noise_snr_train: 0
+
+spec_augment: ""
+dropout_rate: 0 
+
+main_lang: en
+ref_lang_1: de
+ref_lang_2: ''
+resume_training: False
+
+# pt_ckpt: 'whisper_en_tiny_final/step-40000-cer=0.0519-wer=0.0938.ckpt'
+pt_ckpt: 'tmp_best/step-19000-cer=0.0537-wer=0.0973.ckpt'
+train_id: whisper-flamingo_en-deu_tiny
+
+prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
+
+# text
+add_gated_x_attn: 1 # 0 for False, 1 for True
+bert_encoder: False
+
+translation_base_dirs:
+  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/German"
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"

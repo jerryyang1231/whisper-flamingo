@@ -1,0 +1,47 @@
+train_name: whisper
+audio_max_length: 160000 # 10 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 1000
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 5.0e-5
+batch_size: 8
+num_train_steps: 180000
+warmup_steps: 30000
+gradient_accumulation_steps: 1
+
+monitor: 'val/cer_at'  
+noise_prob: 0.0
+noise_snr_train: 0
+
+spec_augment: ""
+dropout_rate: 0 
+
+lang: zh
+resume_training: False
+
+# pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
+pt_ckpt: 'whisper_taigi_small_keyword_prompt/step-144000-cer_at=0.0818-wer_at=0.3265.ckpt'
+train_id: whisper_taigi_small_keyword_prompt_negative
+
+# prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
+
+# text
+add_gated_x_attn: 0 # 0 for False, 1 for True
+bert_encoder: False
+mode: ""
+sequential_gated_x_attn: False # False for parallel flamingo
+
+# prompt
+prompt: 1 # 0 for False, 1 for True
+negative_sample_ratio: 0.9
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-cer_at={val/cer_at:.4f}-wer_at={val/wer_at:.4f}"

@@ -1,0 +1,34 @@
+train_name: whisper
+audio_max_length: 160000  # 10 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 1000
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 1.25e-5  # small
+batch_size: 4
+num_train_steps: 80000
+warmup_steps: 8000
+gradient_accumulation_steps: 1
+
+monitor: 'val/cer'  
+noise_prob: 0.0  
+
+spec_augment: "" 
+dropout_rate: 0
+
+lang: zh
+resume_training: false
+
+# pt_ckpt: ''
+pt_ckpt: 'distil-whisbert-flamingo_taigi pseudo labels(db=12, lr=1.0e-6, bs=16)/step-76000-cer_at=0.1550.ckpt'
+train_id: whisper_taigi_small
+
+log_output_dir: "slurm/train_audio_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-cer_at={val/cer_at:.4f}"

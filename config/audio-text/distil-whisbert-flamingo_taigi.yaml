@@ -1,0 +1,49 @@
+train_name: whisper
+audio_max_length: 160000 # 10 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 1000
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 1.0e-6
+batch_size: 16
+num_train_steps: 90000
+warmup_steps: 15000
+gradient_accumulation_steps: 1
+
+monitor: 'val/cer_at'  
+noise_prob: 0.0
+noise_snr_train: 0
+
+spec_augment: ""
+dropout_rate: 0 
+
+lang: zh
+resume_training: False
+
+teacher_ckpt: 'whisbert-flamingo_taigi_small/step-178000-cer_at=0.1617.ckpt'
+# student_ckpt: 'distil-whisbert-flamingo_taigi pseudo labels(db=12, lr=1.0e-6, bs=16)/step-76000-cer_at=0.1550.ckpt'
+train_id: distil-whisbert-flamingo_taigi pseudo labels revise(db=12, lr=1.0e-6, bs=16)
+
+# text
+add_gated_x_attn: 1 # 0 for False, 1 for True
+bert_encoder: True
+mode: "translation"
+
+# distil
+freeze_encoder: 1
+alpha: 0.8
+beta: 1.0
+temperature: 2.0
+num_student_dec_layers: 12
+use_pseudo_labels: True
+pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/yttd_taigi_trs/pseudo_labels_train.csv
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-cer_at={val/cer_at:.4f}"
