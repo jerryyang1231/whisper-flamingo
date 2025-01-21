@@ -1,0 +1,8 @@
+model_name: small
+teacher_ckpt: 'whisbert-flamingo_taigi_small/step-178000-cer_at=0.1617.ckpt'
+audio_max_length: 160000  # optional
+dropout_rate: 0.0
+
+add_gated_x_attn: 0
+bert_encoder: false
+mode: ""

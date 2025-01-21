@@ -34,8 +34,10 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertTokenizer, BertModel
 import copy
 import torch.nn.functional as F
+import pandas as pd
 
 # my command
+# python -u distil-whisbert-flamingo_librispeech.py config/audio-text/distil-whisbert-flamingo_en-deu.yaml
 # python -u distil-whisbert-flamingo_librispeech.py config/audio-text/distil-whisbert-flamingo_en-cmn+en-deu.yaml
 
 SAMPLE_RATE = 16000
@@ -44,8 +46,8 @@ seed_everything(SEED, workers=True)
 
 class LibriSpeechTextDataset(Dataset):
     def __init__(self, hf_split, tokenizer, sample_rate, model_name, max_length, 
-                spec_augment, noise_prob=0, noise_fn=None, noise_snr=0,
-                translation_base_dirs=None, use_pseudo_labels=False, pseudo_dict=None) -> None:
+                spec_augment, noise_prob=0, noise_fn=None, noise_snr=0, translation_base_dirs=None, 
+                use_pseudo_labels=False, pseudo_dict=None, is_train=False) -> None:
         super().__init__()
        
         # Hugging Face split 到自定義 split 的映射字典
@@ -66,9 +68,21 @@ class LibriSpeechTextDataset(Dataset):
             for split in hf_split.split('+')
         ] if 'train' in hf_split else [self.split_mapping.get(hf_split, hf_split)]
         
-        # 直接使用 Hugging Face datasets API 加載數據
-        self.dataset = load_dataset("librispeech_asr", split=hf_split)
+        # 從 Hugging Face datasets 載入整個 split
+        self.dataset = load_dataset("librispeech_asr", split=hf_split)  
+        print(f"split {hf_split} size: {len(self.dataset)}")
         self.sample_rate = sample_rate
+        
+        # 假設只有在 train split & wer_threshold is not None 時才執行 filter
+        self.is_train = is_train
+        self.use_pseudo_labels = use_pseudo_labels
+        self.pseudo_dict = pseudo_dict  # { "id": (pseudo_label, ground_truth, wer), ... }
+        if self.is_train and cfg.wer_threshold is not None:
+            keep_id_set = set(self.pseudo_dict.keys())
+            old_len = len(self.dataset)
+            self.dataset = self.dataset.filter(lambda sample: sample["id"] in keep_id_set)
+            print(f"Filter train set from {old_len} -> {len(self.dataset)} by pseudo_dict.")
+        
         self.tokenizer = tokenizer
         self.model_name = model_name
         self.max_length = max_length
@@ -76,15 +90,9 @@ class LibriSpeechTextDataset(Dataset):
         self.spec_augment = spec_augment
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
-        self.noise_snr = noise_snr
 
         self.translation_base_dirs = translation_base_dirs
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
-        
-        self.use_pseudo_labels = use_pseudo_labels
-        self.pseudo_dict = pseudo_dict # { id: (pseudo_text, ground_truth) }
-        
-        # print("Dataloader max length : {}".format(max_length))
 
     def __len__(self):
         return len(self.dataset)
@@ -120,37 +128,35 @@ class LibriSpeechTextDataset(Dataset):
         wav_data = item['audio']['array']
         wav_lens = len(wav_data)
 
-        # =========== 選擇 text ===========
-        if self.hf_split in ['validation.clean', 'validation.other', 'test.clean', 'test.other']:
-            # 驗證集、測試集 一律用 item["text"]
+        # ====== 決定 text ======
+        if (not self.is_train) or (not self.use_pseudo_labels):
+            # val/test set 或者根本沒用 pseudo
             text = item["text"]
         else:
-            if self.use_pseudo_labels and (file_id in self.pseudo_dict):
-                pseudo_text, gt_text = self.pseudo_dict[file_id]
-                pseudo_text = pseudo_text.strip()
-                gt_text = gt_text.strip()
-                if not isinstance(pseudo_text, str) or pseudo_text.strip() == "":
-                    text = gt_text
-                else:
-                    text = pseudo_text
-            else:
+            # train set + pseudo
+            pseudo_label, ground_truth, wer = self.pseudo_dict[file_id]
+            pseudo_label = pseudo_label.strip()
+            if not isinstance(pseudo_label, str) or not pseudo_label.strip():
                 text = item["text"]
+            else:
+                text = pseudo_label
         # ===============================
         
         text = self.text_normalizer(text)
-        
+
+        # ====== (可選) 加噪音 ======
         if np.random.rand() > self.noise_prob: # disable noise
             audio = wav_data.flatten().astype(np.float32)
         else: # add noise
             audio = add_noise(wav_data, self.noise_fn, noise_snr=0).flatten().astype(np.float32)
 
-        # pad audio to cfg.audio_max_length (longer samples filtered out already)
+        # ====== pad/truncate ======
         if self.max_length is not None:
             audio = whisper.pad_or_trim(audio.flatten(), length=self.max_length)
-
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels)
 
+        # ====== tokenizer ======
         # Seems like Whisper decode always predicts first token with space, so add a space in the beginning
         # dec_input_ids = [*self.tokenizer.sot_sequence_including_notimestamps] + self.tokenizer.encode(" " + text)
         dec_input_ids = [self.tokenizer.sot, 
@@ -160,7 +166,7 @@ class LibriSpeechTextDataset(Dataset):
                         self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         
-        # 處理兩個翻譯文本
+        # ====== (可選) 多翻譯文本 ======
         translation_1 = self.get_translation_text(file_id, self.translation_base_dirs[0])
         translation_1 = self.text_normalizer(translation_1)
 
@@ -176,15 +182,15 @@ class LibriSpeechTextDataset(Dataset):
             "translation_1": translation_1,
             "translation_2": translation_2,
             "wav_lens": wav_lens,
-            "audio": audio
         }
 
 class DistillWhisperModule(LightningModule):
     def __init__(self, cfg, model_name, lang, train_split, val_clean_split, val_other_split,
-                 test_clean_split, test_other_split) -> None:
+                 test_clean_split, test_other_split, pseudo_dict) -> None:
         super().__init__()
         self.cfg = cfg
         self.model_name = model_name
+        self.pseudo_dict = pseudo_dict
         print("Loading teacher model and weights")
         # ========== Teacher ==========
         self.teacher = whisper.load_model(model_name,
@@ -208,11 +214,15 @@ class DistillWhisperModule(LightningModule):
                 print(str(e))
                 print("Loading weights with strict=False")
                 self.teacher.load_state_dict(state_dict_updated, strict=False) 
-
+        
         # Teacher eval & freeze
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad = False
+        
+        # 打印 teacher encoder 和 decoder 的層數
+        # teacher_enc_layers = len(self.teacher.encoder.blocks)
+        # teacher_dec_layers = len(self.teacher.decoder.blocks)
 
         # ========== Student ==========
         print("Loading student model")
@@ -226,8 +236,18 @@ class DistillWhisperModule(LightningModule):
         if cfg.freeze_encoder != 0:
             for param in self.student.encoder.parameters():
                 param.requires_grad = False
+
+        # 砍掉 decoder blocks, 只留 num_student_dec_layers 層
+        # old_blocks = list(self.student.decoder.blocks)
+        # keep_layers = np.linspace(0, teacher_dec_layers-1, cfg.num_student_dec_layers, dtype=int)
+        # self.student.decoder.blocks = nn.ModuleList([old_blocks[i] for i in keep_layers])
+
+        # student encoder 和 decoder 的層數
+        # student_enc_layers = len(self.student.encoder.blocks)
+        # student_dec_layers = len(self.student.decoder.blocks)
         
         # 部分複製權重 
+        # partial_init_student_from_teacher(self.teacher, self.student, student_enc_layers, student_dec_layers, teacher_enc_layers, teacher_dec_layers)
         partial_init_student_from_teacher(self.teacher, self.student)
 
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
@@ -337,7 +357,6 @@ class DistillWhisperModule(LightningModule):
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
         translation_1 = batch["translation_1"]
-        audio = batch["audio"]
         wav_lens = batch["wav_lens"] 
 
         # 檢查 batch 中是否有 translation_2，沒有則設為 None
@@ -415,8 +434,6 @@ class DistillWhisperModule(LightningModule):
 
         labels[labels == -100] = self.tokenizer.eot
 
-        # 初始化要存儲結果的列表
-        o_list, l_list = [], []
         mod_list = {"at": student_out}
         for mod, out in mod_list.items():
             # remove all decoder predictions after first eot for proper decoding
@@ -425,7 +442,7 @@ class DistillWhisperModule(LightningModule):
             # Set all decoder predictions after first eot to eot
             # TODO: fix for large-v3, which predicts <eot> in the beginning
             eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-                        
+
             # 針對每個序列進行檢查
             for i in range(eot_find.shape[0]):
                 if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
@@ -440,7 +457,8 @@ class DistillWhisperModule(LightningModule):
             total = torch.sum(mask)
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0
-            
+
+            o_list, l_list = [], []
             for o, l in zip(tokens, labels):
                 # 解碼並過濾掉特殊標籤
                 decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
@@ -492,7 +510,8 @@ class DistillWhisperModule(LightningModule):
                                     noise_snr=cfg.noise_snr_train,
                                     translation_base_dirs=cfg.translation_base_dirs,
                                     use_pseudo_labels=cfg.use_pseudo_labels,
-                                    pseudo_dict=getattr(self, "pseudo_dict_train", None)
+                                    pseudo_dict=self.pseudo_dict,
+                                    is_train=True
                                     )  
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -592,6 +611,26 @@ class DistillWhisperModule(LightningModule):
                           num_workers=self.cfg.num_worker,
                           collate_fn=WhisperTextCollatorWhithPadding_librispeech_with_bert())
 
+# def partial_init_student_from_teacher(teacher_model, student_model, student_enc_layers, student_dec_layers, teacher_enc_layers, teacher_dec_layers):
+#     # (A) linspace or manual mapping
+#     encoder_mapping = np.linspace(0, teacher_enc_layers-1, student_enc_layers, dtype=int)
+#     decoder_mapping = np.linspace(0, teacher_dec_layers-1, student_dec_layers, dtype=int)
+
+#     # (B) 先 load 整體
+#     student_model.load_state_dict(teacher_model.state_dict(), strict=False)
+
+#     # (C) 個別block對應
+#     for i, teacher_idx in enumerate(encoder_mapping):
+#         student_model.encoder.blocks[i].load_state_dict(
+#             teacher_model.encoder.blocks[teacher_idx].state_dict(),
+#             strict=True
+#         )
+#     for i, teacher_idx in enumerate(decoder_mapping):
+#         student_model.decoder.blocks[i].load_state_dict(
+#             teacher_model.decoder.blocks[teacher_idx].state_dict(),
+#             strict=False
+#         )
+
 def partial_init_student_from_teacher(teacher_model, student_model):
 
     # 1) 複製 encoder
@@ -612,40 +651,45 @@ if __name__ == "__main__":
         dct = yaml.safe_load(file)
         cfg = types.SimpleNamespace(**dct)
 
-    # 如果要用 pseudo labels，就在這裡讀 CSV 一次
-    pseudo_dict_train = {}
+    pseudo_dict = {}
     if cfg.use_pseudo_labels:
-        import pandas as pd
-        if hasattr(cfg, "pseudo_csv_path_train") and cfg.pseudo_csv_path_train:
-            df_train = pd.read_csv(cfg.pseudo_csv_path_train)
-            for row in df_train.itertuples(index=False):
-                # row.id, row.pseudo_text, row.ground_truth
-                pseudo_dict_train[row.id] = (row.pseudo_text, row.ground_truth)
-    
+        df = pd.read_csv(cfg.pseudo_csv_path_train)
+        if cfg.wer_threshold is not None:
+            df = df[df["wer"] <= cfg.wer_threshold]
+            print(f"Filtered samples by WER <= {cfg.wer_threshold}, remain: {len(df)}")
+        for row in df.itertuples(index=False):
+            pseudo_dict[row.id] = (
+                row.pseudo_text,
+                row.ground_truth,
+                row.wer
+            )
+
     print(cfg)
     print("audio max length: {}".format(cfg.audio_max_length))
 
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="distil-whisbert-flamingo_bilingual pseudo labels revise(db=12, lr=1.0e-6, bs=16)",
+            name="distil-whisbert-flamingo_en-cmn+en-deu_small pseudo labels revise(db=12, lr=1.0e-6, bs=4, wt=none)",
+            # name="distil-whisbert-flamingo_en-cmn+en-deu_small pseudo labels revise(db=12, lr=1.0e-6, bs=4, wt=0.1)",
+            # name="distil-whisbert-flamingo_en-cmn+en-deu_small pseudo labels revise(db=6, lr=1.0e-6, bs=4)",
     )
     
     tflogger, callback_list = setup_logging_and_checkpoint_librispeech(cfg.log_output_dir, 
-                                                                            cfg.check_output_dir, 
-                                                                            cfg.train_name, 
-                                                                            cfg.train_id,
-                                                                            cfg.monitor,
-                                                                            cfg.filename)
+                                                                        cfg.check_output_dir, 
+                                                                        cfg.train_name, 
+                                                                        cfg.train_id,
+                                                                        cfg.monitor,
+                                                                        cfg.filename)
         
     model = DistillWhisperModule(cfg, cfg.model_name, cfg.lang, 
                             'train.clean.100+train.clean.360+train.other.500',
                             'validation.clean',
                             'validation.other',
                             'test.clean',
-                            'test.other')
-    
-    model.pseudo_dict_train = pseudo_dict_train
+                            'test.other',
+                            pseudo_dict,
+                            )
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()

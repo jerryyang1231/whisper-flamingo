@@ -29,7 +29,7 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-os.environ["WANDB_MODE"] = "disabled" 
+os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 from transformers import BertModel, BertTokenizer
 
@@ -79,8 +79,7 @@ class YTTDTaigiTRSDataset(Dataset):
     def __getitem__(self, id):
         lang = cfg.lang
         item = self.dataset[id]
-        
-        # 獲取音頻數據和文本
+
         wav_data = item['audio']['array']
         text = item['text']
         mandarin_text = item['text_mandarin']
@@ -89,9 +88,9 @@ class YTTDTaigiTRSDataset(Dataset):
         text = self.text_normalizer(text)
         text = text.replace(" ", "")
         
-        if np.random.rand() > self.noise_prob: # 不加噪音
+        if np.random.rand() > self.noise_prob: 
             audio = wav_data.flatten().astype(np.float32)
-        else: # 加噪音
+        else:
             audio = add_noise(wav_data, self.noise_fn, noise_snr=0).flatten().astype(np.float32)
         
         audio_frames = len(audio.flatten()) // 160
@@ -368,7 +367,9 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="whisbert-flamingo taigi small reproduce (lr=5.0e-5)",
+            # name="whisbert-flamingo taigi small reproduce (lr=5.0e-5)",
+            name="whisbert-flamingo_taigi_small(num_train_steps=60k, warmup_steps=10k)",
+            
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 

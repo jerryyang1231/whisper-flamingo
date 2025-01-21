@@ -12,8 +12,10 @@ precision: 16-mixed
 model_name: small
 learning_rate: 5.0e-5
 batch_size: 8
-num_train_steps: 180000
-warmup_steps: 30000
+# num_train_steps: 180000
+# warmup_steps: 30000
+num_train_steps: 60000
+warmup_steps: 10000
 gradient_accumulation_steps: 1
 
 monitor: 'val/cer_at'  
@@ -25,9 +27,8 @@ dropout_rate: 0
 
 lang: zh
 resume_training: False
-pt_ckpt: 'whisbert-flamingo_taigi_small/step-178000-cer_at=0.1617.ckpt'
-# pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
-train_id: whisbert-flamingo_taigi_small
+pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
+train_id: whisbert-flamingo_taigi_small(num_train_steps=60k, warmup_steps=10k)
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True

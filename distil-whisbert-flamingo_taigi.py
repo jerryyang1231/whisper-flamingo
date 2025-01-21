@@ -14,7 +14,6 @@ from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
-from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
@@ -29,7 +28,7 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-# os.environ["WANDB_MODE"] = "disabled"
+os.environ["WANDB_MODE"] = "disabled"
 os.environ["WANDB_DIR"] = "/share/nas169/jerryyang/whisper-flamingo/wandb"
 os.environ["TMPDIR"] = "/share/nas169/jerryyang/whisper-flamingo/tmp"
 from transformers import BertModel, BertTokenizer
@@ -49,8 +48,7 @@ valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw',
 
 class YTTDTaigiTRSDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
-                spec_augment, noise_prob=0, noise_fn=None, use_pseudo_labels=False,
-                pseudo_dict=None) -> None:
+                use_pseudo_labels=False, pseudo_dict=None, is_train=False) -> None:
         super().__init__()
         
         # 使用 Hugging Face datasets API 加載資料，並進行切分
@@ -73,12 +71,9 @@ class YTTDTaigiTRSDataset(Dataset):
         self.tokenizer = tokenizer
         self.model_name = model_name
         self.max_length = max_length
-
-        self.spec_augment = spec_augment
-        self.noise_prob = noise_prob
-        self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
 
+        self.is_train = is_train
         self.use_pseudo_labels = use_pseudo_labels
         self.pseudo_dict = pseudo_dict # { id: (pseudo_text, ground_truth) }
 
@@ -93,20 +88,17 @@ class YTTDTaigiTRSDataset(Dataset):
         wav_lens = len(wav_data)
         mandarin_text = item['text_mandarin']
 
-        # =========== 選擇 text ===========
-        if self.split in ["val", "test"]:
-            # 驗證集、測試集 一律用 item["text"]
+        # =========== 決定 text ===========
+        if (not self.is_train) or (not self.use_pseudo_labels):
+            # val/test set 或者根本沒用 pseudo
             text = item["text"]
         else:
-            # 其餘情況(通常是 'train')，才使用 pseudo label
-            if self.use_pseudo_labels and (audio_id in self.pseudo_dict):
-                pseudo_text, gt_text = self.pseudo_dict[audio_id]
-                if not isinstance(pseudo_text, str) or pseudo_text.strip() == "":
-                    text = gt_text
-                else:
-                    text = pseudo_text
-            else:
+            # train set + pseudo
+            pseudo_label, ground_truth = self.pseudo_dict[audio_id]
+            if not isinstance(pseudo_label, str) or not pseudo_label.strip():
                 text = item["text"]
+            else:
+                text = pseudo_label
         # ===============================
 
         text = self.text_normalizer(text).replace(" ", "")
@@ -324,7 +316,7 @@ class DistillWhisperModule(LightningModule):
         else:
             student_feat = self.student.encoder(input_ids)
             student_out = self.student.decoder(dec_input_ids, student_feat)
-        
+
         # ====== 3) CE loss (data loss) ======
         ce_loss = self.ce_loss_fn(student_out.view(-1, student_out.size(-1)), labels.view(-1))
 
@@ -377,7 +369,7 @@ class DistillWhisperModule(LightningModule):
             total = torch.sum(mask)
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0
-                           
+
             o_list, l_list = [], []
             for o, l in zip(tokens, labels):
                 # 解碼並過濾掉特殊標籤
@@ -425,10 +417,9 @@ class DistillWhisperModule(LightningModule):
                                     SAMPLE_RATE,
                                     self.model_name,
                                     max_length=self.cfg.audio_max_length,
-                                    spec_augment=self.cfg.spec_augment,
-                                    noise_prob=cfg.noise_prob,
                                     use_pseudo_labels=cfg.use_pseudo_labels,
-                                    pseudo_dict=getattr(self, "pseudo_dict_train", None)
+                                    pseudo_dict=getattr(self, "pseudo_dict_train", None),
+                                    is_train=True
                                     )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -450,8 +441,6 @@ class DistillWhisperModule(LightningModule):
                                     SAMPLE_RATE,
                                     self.model_name,
                                     max_length=self.cfg.audio_max_length,
-                                    spec_augment=False,
-                                    noise_prob=0,
                                     )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -470,8 +459,6 @@ class DistillWhisperModule(LightningModule):
                                     SAMPLE_RATE,
                                     self.model_name,
                                     max_length=self.cfg.audio_max_length,
-                                    spec_augment=False,
-                                    noise_prob=0,
                                     )                                
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
@@ -519,7 +506,6 @@ if __name__ == "__main__":
             for row in df_train.itertuples(index=False):
                 # row.id, row.pseudo_text, row.ground_truth
                 pseudo_dict_train[row.id] = (row.pseudo_text, row.ground_truth)
-
     
     print(cfg)
     print("audio max length: {}".format(cfg.audio_max_length))
@@ -568,7 +554,7 @@ if __name__ == "__main__":
     if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
-        trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
+        # trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
         trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run

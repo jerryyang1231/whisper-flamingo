@@ -742,7 +742,7 @@ class WhisperTextCollatorWhithPadding_librispeech_without_bert:
 
 class WhisperTextCollatorWhithPadding_librispeech_with_bert:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, translation_1, translation_2, wav_lens, audio = [], [], [], [], [], [], []
+        input_ids, labels, dec_input_ids, translation_1, translation_2, wav_lens = [], [], [], [], [], []
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
@@ -751,17 +751,10 @@ class WhisperTextCollatorWhithPadding_librispeech_with_bert:
             if f.get("translation_2") is not None:  # 檢查 translation_2 是否為 None
                 translation_2.append(f["translation_2"])
             wav_lens.append(f["wav_lens"])
-            audio.append(f["audio"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
         input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
-        
-        # Pad audio (apply the same padding logic)
-        audio_lengths = [a.shape[0] for a in audio]  # Assuming audio is a 1D array of raw waveform
-        max_audio_len = max(audio_lengths)
-        audio = [np.pad(a, (0, max_audio_len - a_len), 'constant', constant_values=0) 
-                for a, a_len in zip(audio, audio_lengths)]
 
         label_lengths = [len(lab) for lab in labels]
         dec_input_ids_length = [len(e) for e in dec_input_ids]
@@ -777,8 +770,7 @@ class WhisperTextCollatorWhithPadding_librispeech_with_bert:
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "translation_1": translation_1,
-            "wav_lens": wav_lens,  # Add wav_lens to the batch
-            "audio": audio  # Add the padded audio to the batch
+            "wav_lens": wav_lens,
         }
         
         if translation_2:  # 如果 translation_2 存在，將其添加到 batch
@@ -786,7 +778,7 @@ class WhisperTextCollatorWhithPadding_librispeech_with_bert:
 
         
         # 只將數值類型的項目轉換為張量
-        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "audio"]:
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
         
         return batch

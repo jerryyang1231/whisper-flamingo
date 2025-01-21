@@ -54,7 +54,6 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
         self.model_name = cfg.model_name
         self.audio_max_length = cfg.audio_max_length
 
-        # self.train = train
         self.translation_base_dirs = translation_base_dirs
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
 
@@ -311,7 +310,6 @@ def generate_pseudo_labels(cfg, split):
                 })
 
     # 寫入 CSV
-    # csv_name = f"pseudo_labels_{split}.csv"
     csv_name = os.path.join(cfg.output_dir, f"pseudo_labels_{split}.csv")
     df = pd.DataFrame(results)
     df.to_csv(csv_name, index=False, encoding="utf-8")

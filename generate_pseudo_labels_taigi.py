@@ -15,9 +15,9 @@ from transformers import BertModel, BertTokenizer
 from utils_batch_samplers import SortedBatchSampler
 
 # my command
-# python generate_pseudo_labels.py config/generate_pseudo_labels.yaml train
-# python generate_pseudo_labels.py config/generate_pseudo_labels.yaml val
-# python generate_pseudo_labels.py config/generate_pseudo_labels.yaml test
+# python generate_pseudo_labels_taigi.py config/generate_pseudo_labels_taigi.yaml train
+# python generate_pseudo_labels_taigi.py config/generate_pseudo_labels_taigi.yaml val
+# python generate_pseudo_labels_taigi.py config/generate_pseudo_labels_taigi.yaml test
 
 ################################################################################
 # 1. Dataset 定義 (模仿你的 YTTDTaigiTRSDataset)，但只保留 Teacher 前處理邏輯
@@ -272,7 +272,8 @@ def generate_pseudo_labels(cfg, split):
             #         pass
 
     # 寫入 CSV
-    csv_name = f"pseudo_labels_{split}.csv"
+    # csv_name = f"pseudo_labels_{split}.csv"
+    csv_name = f"without_teacher.csv"
     df = pd.DataFrame(results)
     df.to_csv(csv_name, index=False, encoding="utf-8")
     print(f"Done! Pseudo labels saved to: {csv_name}")

@@ -16,7 +16,7 @@ num_train_steps: 480000
 warmup_steps: 48000
 gradient_accumulation_steps: 1
 
-monitor: 'dev-other/wer_at'  
+monitor: 'dev-other/wer_at'
 noise_prob: 0.0
 noise_snr_train: 0
 
@@ -35,8 +35,6 @@ prob_use_at: 1.0 # For Whisper-Flamingo, no modality dropout
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
 bert_encoder: True
-add_resnet: False
-num_resnet_layer: 0
 mode: "translation"
 
 translation_base_dirs:

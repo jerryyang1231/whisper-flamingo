@@ -20,7 +20,6 @@ monitor: 'val/cer_at'
 noise_prob: 0.0
 noise_snr_train: 0
 
-spec_augment: ""
 dropout_rate: 0 
 
 lang: zh

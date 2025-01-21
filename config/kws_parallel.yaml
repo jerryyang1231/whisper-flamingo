@@ -27,7 +27,7 @@ dropout_rate: 0
 lang: zh
 resume_training: False
 
-pt_ckpt: ''
+pt_ckpt: '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/tmp_best/step-160000-f1=0.8662.ckpt'
 train_id: kws_parallel
 
 # text
