@@ -1,12 +1,11 @@
 import os
 import sys
 import yaml
-import json
 import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset 
+from datasets import load_dataset
 from torch.utils.data import Dataset
 import pandas as pd
 import whisper
@@ -19,20 +18,18 @@ from spec_augment import spec_augment
 from utils import (
     load_wave,
     add_noise,
-    keyword_prompt_collator,
+    prompt_collator,
     whisper_optimizer,
     setup_logging_and_checkpoint_taigi,
     wer_cer,
     DistributedSamplerWrapper,
-    get_all_keywords,
 )
 from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-# os.environ["WANDB_MODE"] = "disabled"
+os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
-from transformers import BertModel, BertTokenizer
 
 # my command
 # python -u translation_prompt.py config/audio-text/translation_prompt.yaml
@@ -49,15 +46,12 @@ class YTTDTaigiTRSDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
                  spec_augment, noise_prob=0, noise_fn=None) -> None:
         super().__init__()
-        
-        # 使用 Hugging Face datasets API 加載資料，並進行切分
+
         if split == 'train':
             dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-            # 過濾出不在 valid_set_list 中的資料作為訓練集
             self.dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
         elif split == 'val':
             dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-            # 根據 valid_set_list 過濾驗證集
             self.dataset = dataset.filter(lambda sample: sample['id'][:11] in valid_set_list)
         else:  # 'test'
             self.dataset = load_dataset("formospeech/yttd_taigi_trs", name='test', split='train')
@@ -78,7 +72,6 @@ class YTTDTaigiTRSDataset(Dataset):
     def __getitem__(self, id):
         lang = cfg.lang
         item = self.dataset[id]
-
         wav_data = item['audio']['array']
         text = item['text']
         text_mandarin = item['text_mandarin']
@@ -141,9 +134,9 @@ class WhisperTextModule(LightningModule):
                                         add_gated_x_attn=cfg.add_gated_x_attn,
                                         bert_encoder = cfg.bert_encoder,
                                         mode = cfg.mode,
-                                        sequential_gated_x_attn = cfg.sequential_gated_x_attn,
                                         )
-
+        
+        # 這邊順序最好改成先load ckpt 再freeze encoder
         # freeze whisper encoder gradients for prompt
         if cfg.prompt != 0:
             for param in self.model.encoder.parameters():
@@ -306,7 +299,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=keyword_prompt_collator())
+                          collate_fn=prompt_collator())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -325,7 +318,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=keyword_prompt_collator())
+                          collate_fn=prompt_collator())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -344,7 +337,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=keyword_prompt_collator())
+                          collate_fn=prompt_collator())
 
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
@@ -399,7 +392,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()

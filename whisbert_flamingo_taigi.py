@@ -49,15 +49,12 @@ class YTTDTaigiTRSDataset(Dataset):
                  spec_augment, noise_prob=0, noise_fn=None) -> None:
         super().__init__()
         
-        # 使用 Hugging Face datasets API 加載資料，並進行切分
         if split == 'train':
             dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-            # 過濾出不在 valid_set_list 中的資料作為訓練集
             self.dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
             print(f"train set size: {len(self.dataset)}")
         elif split == 'val':
             dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-            # 根據 valid_set_list 過濾驗證集
             self.dataset = dataset.filter(lambda sample: sample['id'][:11] in valid_set_list)
             print(f"valid set size: {len(self.dataset)}")
         else:  # 'test'
@@ -112,7 +109,7 @@ class YTTDTaigiTRSDataset(Dataset):
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
-                        self.tokenizer.encode(" " + text)       
+                        self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
 
         mandarin_text = mandarin_text.replace(" ", "")

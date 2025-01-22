@@ -26,11 +26,12 @@ dropout_rate: 0
 lang: zh
 resume_training: False
 
-pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
+# pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
+pt_ckpt: 'translation_prompt(lr=1.0e-6)/step-169000-cer_at=0.1232.ckpt' 
 # train_id: translation_prompt(lr=5.0e-5)
 train_id: translation_prompt(lr=1.0e-6)
 
-# text
+# flamingo
 add_gated_x_attn: 0 # 0 for False, 1 for True
 bert_encoder: False
 mode: ""

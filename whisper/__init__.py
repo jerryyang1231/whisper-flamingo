@@ -109,7 +109,6 @@ def load_model(
     bert_dim: int = 768, 
     mode: str = "",
     sequential_gated_x_attn: bool = False, 
-    # adakws_checkpoint: Optional[str] = None,
 ) -> Whisper:
     """
     Load a Whisper ASR model

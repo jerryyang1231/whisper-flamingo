@@ -17,7 +17,7 @@ from tqdm import tqdm
 from utils import (
     load_wave,
     add_noise,
-    WhisperTextCollatorWhithPadding_taigi_with_bert,
+    DistilPromptCollator,
     whisper_optimizer,
     whisper_flamingo_optimizer,
     setup_logging_and_checkpoint_taigi,
@@ -28,15 +28,15 @@ from utils_batch_samplers import SortedBatchSampler
 from whisper.normalizers.basic import BasicTextNormalizer
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
-os.environ["WANDB_MODE"] = "disabled"
+# os.environ["WANDB_MODE"] = "disabled"
 os.environ["WANDB_DIR"] = "/share/nas169/jerryyang/whisper-flamingo/wandb"
-os.environ["TMPDIR"] = "/share/nas169/jerryyang/whisper-flamingo/tmp"
-from transformers import BertModel, BertTokenizer
+# os.environ["TMPDIR"] = "/share/nas169/jerryyang/whisper-flamingo/tmp"
 import copy
 import torch.nn.functional as F
+import pandas as pd
 
 # my command
-# python -u distil-whisbert-flamingo_taigi.py config/audio-text/distil-whisbert-flamingo_taigi.yaml
+# python -u distil-whisper-prompt.py config/audio-text/distil-whisper-prompt.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -50,23 +50,17 @@ class YTTDTaigiTRSDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
                 use_pseudo_labels=False, pseudo_dict=None, is_train=False) -> None:
         super().__init__()
-        
-        # 使用 Hugging Face datasets API 加載資料，並進行切分
+
         if split == 'train':
             dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-            # 過濾出不在 valid_set_list 中的資料作為訓練集
             self.dataset = dataset.filter(lambda sample: sample['id'][:11] not in valid_set_list)
-            print(f"train set size: {len(self.dataset)}")
         elif split == 'val':
             dataset = load_dataset("formospeech/yttd_taigi_trs", name='train', split='train')
-            # 根據 valid_set_list 過濾驗證集
             self.dataset = dataset.filter(lambda sample: sample['id'][:11] in valid_set_list)
-            print(f"valid set size: {len(self.dataset)}")
         else:  # 'test'
             self.dataset = load_dataset("formospeech/yttd_taigi_trs", name='test', split='train')
-            print(f"test set size: {len(self.dataset)}")
-        
-        self.split = split
+        print(f"{split} set size: {len(self.dataset)}")
+
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
         self.model_name = model_name
@@ -75,7 +69,7 @@ class YTTDTaigiTRSDataset(Dataset):
 
         self.is_train = is_train
         self.use_pseudo_labels = use_pseudo_labels
-        self.pseudo_dict = pseudo_dict # { id: (pseudo_text, ground_truth) }
+        self.pseudo_dict = pseudo_dict # { id: (pseudo_text, ground_truth, cer) }
 
     def __len__(self):
         return len(self.dataset)
@@ -85,8 +79,8 @@ class YTTDTaigiTRSDataset(Dataset):
         item = self.dataset[id]
         audio_id = item["id"]
         wav_data = item['audio']['array']
+        text_mandarin = item['text_mandarin']
         wav_lens = len(wav_data)
-        mandarin_text = item['text_mandarin']
 
         # =========== 決定 text ===========
         if (not self.is_train) or (not self.use_pseudo_labels):
@@ -94,7 +88,7 @@ class YTTDTaigiTRSDataset(Dataset):
             text = item["text"]
         else:
             # train set + pseudo
-            pseudo_label, ground_truth = self.pseudo_dict[audio_id]
+            pseudo_label, ground_truth, cer = self.pseudo_dict[audio_id]
             if not isinstance(pseudo_label, str) or not pseudo_label.strip():
                 text = item["text"]
             else:
@@ -102,7 +96,8 @@ class YTTDTaigiTRSDataset(Dataset):
         # ===============================
 
         text = self.text_normalizer(text).replace(" ", "")
-        
+        text_mandarin = self.text_normalizer(text_mandarin).replace(" ", "")
+
         audio = wav_data.flatten().astype(np.float32)
 
         if self.max_length is not None:
@@ -111,29 +106,40 @@ class YTTDTaigiTRSDataset(Dataset):
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
 
-        dec_input_ids = [self.tokenizer.sot, 
-                        self.tokenizer.special_tokens["<|{}|>".format(lang)],
-                        self.tokenizer.transcribe, 
-                        self.tokenizer.no_timestamps] + \
-                        self.tokenizer.encode(" " + text)
-        labels = dec_input_ids[1:] + [self.tokenizer.eot]
+        prompt_ids = [self.tokenizer.sot_prev] + \
+                    self.tokenizer.encode(" " + text_mandarin)
+        prompt_lens = len(prompt_ids)
 
-        mandarin_text = mandarin_text.replace(" ", "")
-        mandarin_text = self.text_normalizer(mandarin_text)
+        teacher_dec_input_ids = prompt_ids + \
+                                [self.tokenizer.sot, 
+                                self.tokenizer.special_tokens["<|{}|>".format(lang)],
+                                self.tokenizer.transcribe, 
+                                self.tokenizer.no_timestamps] + \
+                                self.tokenizer.encode(" " + text)
+                
+        student_dec_input_ids = [self.tokenizer.sot, 
+                                self.tokenizer.special_tokens["<|{}|>".format(lang)],
+                                self.tokenizer.transcribe, 
+                                self.tokenizer.no_timestamps] + \
+                                self.tokenizer.encode(" " + text)
+
+        student_labels = student_dec_input_ids[1:] + [self.tokenizer.eot]
 
         return {
             "input_ids": mel,
-            "labels": labels,
-            "dec_input_ids": dec_input_ids,
-            "translations": mandarin_text,
-            "wav_lens": wav_lens
+            "wav_lens": wav_lens,
+            "prompt_lens": prompt_lens,
+            "teacher_dec_input_ids": teacher_dec_input_ids,
+            "student_dec_input_ids": student_dec_input_ids,
+            "student_labels": student_labels,
         }
 
 class DistillWhisperModule(LightningModule):
-    def __init__(self, cfg, model_name, lang) -> None:
+    def __init__(self, cfg, model_name, lang, pseudo_dict) -> None:
         super().__init__()
         self.cfg = cfg
         self.model_name = model_name
+        self.pseudo_dict = pseudo_dict
         print("Loading teacher model and weights")
         # ========== Teacher ==========
         self.teacher = whisper.load_model(model_name,
@@ -154,7 +160,7 @@ class DistillWhisperModule(LightningModule):
             try:
                 self.teacher.load_state_dict(state_dict_updated) 
             except BaseException as e: 
-                # print(str(e))
+                print(str(e))
                 print("Loading weights with strict=False")
                 self.teacher.load_state_dict(state_dict_updated, strict=False) 
 
@@ -170,33 +176,14 @@ class DistillWhisperModule(LightningModule):
                                         download_root="/share/nas169/jerryyang/whisper-flamingo/models",
                                         dropout_rate=cfg.dropout_rate,
                                         )
-        
-        # # test student
-        # if cfg.student_ckpt != '': # load audio-only FT ckpt
-        #     checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
-        #     checkpoint = torch.load(os.path.join(checkpoint_root, cfg.student_ckpt), map_location=torch.device('cpu'))
-        #     state_dict = checkpoint["state_dict"] 
-        #     student_only_sd = {}
-        #     for k, v in state_dict.items():
-        #         # 保留 student. 開頭
-        #         if k.startswith("student."):
-        #             new_k = k[len("student."):]  # 去除前綴
-        #             student_only_sd[new_k] = v
-        #     # print(student_only_sd.keys())
-        #     try:
-        #         self.student.load_state_dict(student_only_sd) 
-        #     except BaseException as e: 
-        #         print(str(e))
-        #         print("Loading weights with strict=False")
-        #         self.student.load_state_dict(student_only_sd, strict=False) 
 
+        # 部分複製權重 
+        partial_init_student_from_teacher(self.teacher, self.student)
+        
         # freeze student encoder gradients for ditil
         if cfg.freeze_encoder != 0:
             for param in self.student.encoder.parameters():
                 param.requires_grad = False
-
-        # 部分複製權重 
-        partial_init_student_from_teacher(self.teacher, self.student)
 
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='zh', task='transcribe')
         self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
@@ -204,56 +191,43 @@ class DistillWhisperModule(LightningModule):
        
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
-    
-        # 初始化 BERT 分詞器和模型
-        self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-        self.bert_model = BertModel.from_pretrained('bert-base-chinese').to(self.device)
 
     def training_step(self, batch, batch_id):
         input_ids = batch["input_ids"]
-        labels = batch["labels"].long()
-        dec_input_ids = batch["dec_input_ids"].long()
-        translations = batch["translations"]
+        prompt_lens = batch["prompt_lens"]
+        teacher_dec_input_ids = batch["teacher_dec_input_ids"].long()
+        student_dec_input_ids = batch["student_dec_input_ids"].long()
+        student_labels = batch["student_labels"].long()
 
         # ====== 1) Teacher (無梯度) ======
         with torch.no_grad():
-            # 取得翻譯 embeddings
-            bert_inputs = self.bert_tokenizer(
-                translations,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=448
-            ).to(self.device)
-            bert_outputs = self.bert_model(**bert_inputs)
-            translation_embeddings = bert_outputs.last_hidden_state
-
             teacher_feat = self.teacher.encoder(input_ids)
-            teacher_out = self.teacher.decoder(
-                dec_input_ids, teacher_feat, xt_1=translation_embeddings
-            )
+            teacher_out = self.teacher.decoder(teacher_dec_input_ids, teacher_feat)
 
         # ====== 2) Student ======
         if self.cfg.freeze_encoder:
-            student_out = self.student.decoder(dec_input_ids, teacher_feat)
+            student_out = self.student.decoder(student_dec_input_ids, teacher_feat)
         else:
             student_feat = self.student.encoder(input_ids)
-            student_out = self.student.decoder(dec_input_ids, student_feat)
+            student_out = self.student.decoder(student_dec_input_ids, student_feat)
 
         # ====== 3) CE loss (data loss) ======
-        ce_loss = self.ce_loss_fn(student_out.view(-1, student_out.size(-1)), labels.view(-1))
+        ce_loss = self.ce_loss_fn(student_out.view(-1, student_out.size(-1)), student_labels.view(-1))
+
+        # 針對 teacher_out 切除 prompt，並再度 padding
+        teacher_out_no_prompt = slice_and_repad_teacher_logits(teacher_out, student_out, prompt_lens)
 
         # ====== 4) KD loss (distribution alignment) ======
         T = self.cfg.temperature
-        teacher_probs = F.softmax(teacher_out / T, dim=-1) # [batch, seq_len, vocab_size]
+        teacher_probs = F.softmax(teacher_out_no_prompt / T, dim=-1) # [batch, seq_len, vocab_size]
         student_log_probs = F.log_softmax(student_out / T, dim=-1)
         
         # (A) 先算 "逐 token" KL-div, shape = [batch, seq_len, vocab_size]
         kl_all = self.kd_loss_fn(student_log_probs, teacher_probs)
 
-        # (B) 根據 labels 遮蔽要忽略的 token (labels = -100)
-        #     通常 labels = -100 表示該位置的 label 無效 (padding / ignore)
-        padding_mask = (labels != -100).unsqueeze(-1)  # [batch, seq_len, 1]
+        # (B) 根據 student_labels 遮蔽要忽略的 token (student_labels = -100)
+        #     通常 student_labels = -100 表示該位置的 label 無效 (padding / ignore)
+        padding_mask = (student_labels != -100).unsqueeze(-1)  # [batch, seq_len, 1]
         kl_all = kl_all * padding_mask                 # 將無效位置的 KL 設為 0
 
         # (C) 將剩餘位置的 KL 做 sum，再除以 mask.sum() (有效token總數)，得到「平均」
@@ -275,47 +249,40 @@ class DistillWhisperModule(LightningModule):
             
     def validation_step(self, batch, batch_id, dataloader_idx=None):
         input_ids = batch["input_ids"]
-        labels = batch["labels"].long()
-        dec_input_ids = batch["dec_input_ids"].long()
-        translations = batch["translations"]
-        
+        prompt_lens = batch["prompt_lens"]
+        teacher_dec_input_ids = batch["teacher_dec_input_ids"].long()
+        student_dec_input_ids = batch["student_dec_input_ids"].long()
+        student_labels = batch["student_labels"].long()
+
         # ====== 1) Teacher (無梯度) ======
         with torch.no_grad():
-            # 取得翻譯 embeddings
-            bert_inputs = self.bert_tokenizer(
-                translations,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=448 
-            ).to(self.device)
-            bert_outputs = self.bert_model(**bert_inputs)
-            translation_embeddings = bert_outputs.last_hidden_state
-
             teacher_feat = self.teacher.encoder(input_ids)
-            teacher_out = self.teacher.decoder(dec_input_ids, teacher_feat, xt_1=translation_embeddings)
+            teacher_out = self.teacher.decoder(teacher_dec_input_ids, teacher_feat)
 
         # ====== 2) Student ======
         if self.cfg.freeze_encoder:
-            student_out = self.student.decoder(dec_input_ids, teacher_feat)
+            student_out = self.student.decoder(student_dec_input_ids, teacher_feat)
         else:
             student_feat = self.student.encoder(input_ids)
-            student_out = self.student.decoder(dec_input_ids, student_feat)
+            student_out = self.student.decoder(student_dec_input_ids, student_feat)
 
         # ====== 3) CE loss (data loss) ======
-        ce_loss = self.ce_loss_fn(student_out.view(-1, student_out.size(-1)), labels.view(-1))
+        ce_loss = self.ce_loss_fn(student_out.view(-1, student_out.size(-1)), student_labels.view(-1))
+
+        # 針對 teacher_out 切除 prompt，並再度 padding
+        teacher_out_no_prompt = slice_and_repad_teacher_logits(teacher_out, student_out, prompt_lens)
 
         # ====== 4) KD loss (distribution alignment) ======
         T = 1.0
-        teacher_probs = F.softmax(teacher_out / T, dim=-1) # [batch, seq_len, vocab_size]
+        teacher_probs = F.softmax(teacher_out_no_prompt / T, dim=-1) # [batch, seq_len, vocab_size]
         student_log_probs = F.log_softmax(student_out / T, dim=-1)
         
         # (A) 先算 "逐 token" KL-div, shape = [batch, seq_len, vocab_size]
         kl_all = self.kd_loss_fn(student_log_probs, teacher_probs)
 
-        # (B) 根據 labels 遮蔽要忽略的 token (labels = -100)
-        #     通常 labels = -100 表示該位置的 label 無效 (padding / ignore)
-        padding_mask = (labels != -100).unsqueeze(-1)  # [batch, seq_len, 1]
+        # (B) 根據 student_labels 遮蔽要忽略的 token (student_labels = -100)
+        #     通常 student_labels = -100 表示該位置的 label 無效 (padding / ignore)
+        padding_mask = (student_labels != -100).unsqueeze(-1)  # [batch, seq_len, 1]
         kl_all = kl_all * padding_mask                 # 將無效位置的 KL 設為 0
         
         # (C) 將剩餘位置的 KL 做 sum，再除以 mask.sum() (有效token總數)，得到「平均」
@@ -329,7 +296,7 @@ class DistillWhisperModule(LightningModule):
         beta  = self.cfg.beta
         loss  = alpha * ce_loss + beta * kd_loss
 
-        labels[labels == -100] = self.tokenizer.eot
+        student_labels[student_labels == -100] = self.tokenizer.eot
 
         mod_list = {"at": student_out}
         for mod, out in mod_list.items():
@@ -337,29 +304,44 @@ class DistillWhisperModule(LightningModule):
             tokens = torch.argmax(out, dim=2)
 
             # Set all decoder predictions after first eot to eot
-            # TODO: fix for large-v3, which predicts <eot> in the beginning
-            eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
-
-            # 針對每個序列進行檢查
-            for i in range(eot_find.shape[0]):
-                if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
-                    first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
-                    tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
+            for i in range(tokens.size(0)):
+                pl = prompt_lens[i].item()  # prompt_lens[i] 是當前樣本的prompt長度
+                # 對 tokens[i, pl:] 這段進行 EOT 搜尋
+                eot_positions = (tokens[i, pl:] == self.tokenizer.eot).nonzero(as_tuple=False)
+                if eot_positions.numel() > 0:
+                    # 檢查第一個元素是否為 0
+                    if eot_positions[0].item() == 0:
+                        if eot_positions.size(0) > 1:
+                            # 若有第二個元素，使用第二個位置
+                            first_eot = pl + eot_positions[1].item()
+                        else:
+                            # 若沒有第二個元素，跳過此次處理
+                            continue
+                    else:
+                        # 正常使用第一個元素
+                        first_eot = pl + eot_positions[0].item()
+                    # 從 first_eot+1 開始填上 eot (50257) 避免 decode 到 padding 區
+                    tokens[i, first_eot + 1:] = self.tokenizer.eot
 
             # calculate next token prediction, not include lang tag, task, and no timestamps token
             mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
             n_correct = torch.sum(
-                tokens[:, 3:].masked_select(mask).eq(labels[:, 3:].masked_select(mask))
+                tokens[:, 3:].masked_select(mask).eq(student_labels[:, 3:].masked_select(mask))
             )
             total = torch.sum(mask)
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0
 
             o_list, l_list = [], []
-            for o, l in zip(tokens, labels):
+            for idx, (o, l, pl) in enumerate(zip(tokens, student_labels, prompt_lens)):
+                pl = pl.item()
+                
+                # 排除 prompt_ids 部分
+                o = o[pl:]
+                
                 # 解碼並過濾掉特殊標籤
                 decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
-                decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
+                decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set and t.item() != -100])
                 
                 # 正規化文本並移除空格
                 normalized_o = self.text_normalizer(decoded_o).replace(" ", "")
@@ -403,7 +385,7 @@ class DistillWhisperModule(LightningModule):
                                     self.model_name,
                                     max_length=self.cfg.audio_max_length,
                                     use_pseudo_labels=cfg.use_pseudo_labels,
-                                    pseudo_dict=getattr(self, "pseudo_dict_train", None),
+                                    pseudo_dict=self.pseudo_dict,
                                     is_train=True
                                     )
         batch_sampler = SortedBatchSampler(
@@ -418,7 +400,7 @@ class DistillWhisperModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_with_bert())
+                          collate_fn=DistilPromptCollator())
 
     def val_dataloader(self):
         dataset = YTTDTaigiTRSDataset('val',
@@ -436,7 +418,7 @@ class DistillWhisperModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_with_bert())
+                          collate_fn=DistilPromptCollator())
        
     def test_dataloader(self):
         dataset = YTTDTaigiTRSDataset('test',  
@@ -454,7 +436,7 @@ class DistillWhisperModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_taigi_with_bert())
+                          collate_fn=DistilPromptCollator())
 
 def partial_init_student_from_teacher(teacher_model, student_model):
 
@@ -470,21 +452,66 @@ def partial_init_student_from_teacher(teacher_model, student_model):
         strict=False
     )
 
+def slice_and_repad_teacher_logits(teacher_out, student_out, prompt_lens, pad_value=0.0):
+    """
+    teacher_out: [B, T_teacher, vocab]
+    student_out: [B, T_student, vocab]
+    prompt_lens: [B], 每個樣本 prompt token 數量
+    pad_value:   slice 後再 padding 的填充值，預設填 0.0 (logits)
+    """
+    B, T_teacher, vocab = teacher_out.shape
+    _, T_student, _     = student_out.shape
+    
+    teacher_slices = []
+    lengths_after_cut = []
+
+    # 1) 逐樣本砍掉 prompt
+    for i in range(B):
+        pl = prompt_lens[i].item()
+        end_pos = pl + T_student 
+        # 如果 pl + T_student 大於 T_teacher，就要避免 out-of-range
+        # end_pos = min(end_pos, T_teacher)
+        slice_i = teacher_out[i, pl : end_pos, :]
+        teacher_slices.append(slice_i)
+        lengths_after_cut.append(slice_i.shape[0])
+
+    # 2) 找本 batch 切掉後的最長長度 
+    max_len_after_cut = max(lengths_after_cut)
+
+    # 3) 針對不同樣本再度 padding，讓它們都對齊到 max_len_after_cut
+    teacher_padded_list = []
+    for i, ts in enumerate(teacher_slices):
+        seq_len = ts.shape[0]
+        pad_needed = max_len_after_cut - seq_len
+
+        if pad_needed > 0:
+            # 在 time dim (seq_len) 的後面做 padding
+            # F.pad 的填充值順序為 (left, right, top, bottom, ...)
+            # 這裡只要在 seq_len 後面補即可 => (0, 0) for vocab dim, (0, pad_needed) for seq dim
+            ts_padded = F.pad(ts, (0, 0, 0, pad_needed), value=pad_value)
+        else:
+            ts_padded = ts
+        teacher_padded_list.append(ts_padded)
+
+    # 4) 最終 stack 回 batch => [B, max_len_after_cut, vocab]
+    teacher_out_no_prompt = torch.stack(teacher_padded_list, dim=0)
+    return teacher_out_no_prompt
+
 if __name__ == "__main__":
     cfg_yaml = sys.argv[1]
     with open(cfg_yaml, 'r') as file:
         dct = yaml.safe_load(file)
         cfg = types.SimpleNamespace(**dct)
 
-    # 如果要用 pseudo labels，就在這裡讀 CSV 一次
-    pseudo_dict_train = {}
+    pseudo_dict = {}
     if cfg.use_pseudo_labels:
-        import pandas as pd
-        if hasattr(cfg, "pseudo_csv_path_train") and cfg.pseudo_csv_path_train:
-            df_train = pd.read_csv(cfg.pseudo_csv_path_train)
-            for row in df_train.itertuples(index=False):
-                # row.id, row.pseudo_text, row.ground_truth
-                pseudo_dict_train[row.id] = (row.pseudo_text, row.ground_truth)
+        df_train = pd.read_csv(cfg.pseudo_csv_path_train)
+        for row in df_train.itertuples(index=False):
+            pseudo_dict[row.id] = (
+                row.pseudo_text,
+                row.ground_truth,
+                row.cer
+            )
     
     print(cfg)
     print("audio max length: {}".format(cfg.audio_max_length))
@@ -492,7 +519,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="distil-whisbert-flamingo_taigi pseudo labels revise(db=12, lr=1.0e-6, bs=16)",
+            name="distil-whisper-prompt(lr=1.0e-6, bs=16)",
     )
     
     tflogger, checkpoint_callback, callback_list = setup_logging_and_checkpoint_taigi(cfg.log_output_dir, 
@@ -500,11 +527,10 @@ if __name__ == "__main__":
                                                                                     cfg.train_name, 
                                                                                     cfg.train_id,
                                                                                     cfg.monitor,
-                                                                                    cfg.filename)
+                                                                                    cfg.filename,
+                                                                                    )
         
-    model = DistillWhisperModule(cfg, cfg.model_name, cfg.lang)
-    
-    model.pseudo_dict_train = pseudo_dict_train
+    model = DistillWhisperModule(cfg, cfg.model_name, cfg.lang, pseudo_dict,)
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
@@ -534,7 +560,7 @@ if __name__ == "__main__":
         trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
     else:
         trainer.validate(model=model, dataloaders=[model.val_dataloader(), model.test_dataloader()]) # validate before training
-        # trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
+        trainer.fit(model, val_dataloaders=[model.val_dataloader(), model.test_dataloader()])
 
     # End the WandB run
     wandb.finish()
