@@ -302,26 +302,16 @@ class DistillWhisperModule(LightningModule):
         for mod, out in mod_list.items():
             # remove all decoder predictions after first eot for proper decoding
             tokens = torch.argmax(out, dim=2)
-
+    
             # Set all decoder predictions after first eot to eot
-            for i in range(tokens.size(0)):
-                pl = prompt_lens[i].item()  # prompt_lens[i] 是當前樣本的prompt長度
-                # 對 tokens[i, pl:] 這段進行 EOT 搜尋
-                eot_positions = (tokens[i, pl:] == self.tokenizer.eot).nonzero(as_tuple=False)
-                if eot_positions.numel() > 0:
-                    # 檢查第一個元素是否為 0
-                    if eot_positions[0].item() == 0:
-                        if eot_positions.size(0) > 1:
-                            # 若有第二個元素，使用第二個位置
-                            first_eot = pl + eot_positions[1].item()
-                        else:
-                            # 若沒有第二個元素，跳過此次處理
-                            continue
-                    else:
-                        # 正常使用第一個元素
-                        first_eot = pl + eot_positions[0].item()
-                    # 從 first_eot+1 開始填上 eot (50257) 避免 decode 到 padding 區
-                    tokens[i, first_eot + 1:] = self.tokenizer.eot
+            # TODO: fix for large-v3, which predicts <eot> in the beginning
+            eot_find = (torch.where(tokens == self.tokenizer.eot, 1, 0))
+
+            # 針對每個序列進行檢查
+            for i in range(eot_find.shape[0]):
+                if torch.any(eot_find[i] == 1):  # 如果該序列中存在 EOT 標記
+                    first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
+                    tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = self.tokenizer.eot
 
             # calculate next token prediction, not include lang tag, task, and no timestamps token
             mask = ~(tokens[:, 3:] == self.tokenizer.eot) # torch.ne fails for some reason
@@ -333,15 +323,10 @@ class DistillWhisperModule(LightningModule):
             acc = acc if acc < 1 else 0
 
             o_list, l_list = [], []
-            for idx, (o, l, pl) in enumerate(zip(tokens, student_labels, prompt_lens)):
-                pl = pl.item()
-                
-                # 排除 prompt_ids 部分
-                o = o[pl:]
-                
+            for o, l in zip(tokens, student_labels):
                 # 解碼並過濾掉特殊標籤
                 decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
-                decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set and t.item() != -100])
+                decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
                 
                 # 正規化文本並移除空格
                 normalized_o = self.text_normalizer(decoded_o).replace(" ", "")
