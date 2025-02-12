@@ -1,0 +1,15 @@
+name: whisper-flamingo
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.8
+  - ffmpeg==4.2.2
+  - sox
+  - scipy
+  - fairseq
+  - hydra-core
+  - submitit
+  - git-filter-repo
+prefix: /share/nas169/jerryyang/miniconda3/envs/whisper-flamingo

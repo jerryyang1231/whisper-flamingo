@@ -11,15 +11,12 @@ from tqdm import tqdm
 import whisper
 from utils import wer_cer
 from whisper.normalizers.basic import BasicTextNormalizer
-from transformers import BertModel, BertTokenizer
 from utils_batch_samplers import SortedBatchSampler
 
 # my command
-# python generate_pseudo_labels_librispeech.py config/generate_pseudo_labels_librispeech.yaml train.clean.100+train.clean.360+train.other.500
-# python generate_pseudo_labels_librispeech.py config/generate_pseudo_labels_librispeech.yaml validation.clean
-# python generate_pseudo_labels_librispeech.py config/generate_pseudo_labels_librispeech.yaml validation.other
-# python generate_pseudo_labels_librispeech.py config/generate_pseudo_labels_librispeech.yaml test.clean
-# python generate_pseudo_labels_librispeech.py config/generate_pseudo_labels_librispeech.yaml test.other
+# python generate_pseudo_labels_librispeech_prompt.py config/generate_pseudo_labels_librispeech_prompt.yaml train.clean.100+train.clean.360+train.other.500
+
+MAX_PROMPT_LEN = 100
 
 ################################################################################
 # 1. Dataset 
@@ -49,6 +46,7 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
         
         # 直接使用 Hugging Face datasets API 加載數據
         self.dataset = load_dataset("librispeech_asr", split=hf_split)
+        print(f"{hf_split} size: {len(self.dataset)} samples")
         self.sample_rate = 16000
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
         self.model_name = cfg.model_name
@@ -87,7 +85,6 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
     def __getitem__(self, id):
         lang= cfg.lang
         item = self.dataset[id]
-
         file_id = item['id']
         wav_data = item['audio']['array']
         text = self.text_normalizer(item['text'])
@@ -102,32 +99,39 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
 
-        # Seems like Whisper decode always predicts first token with space, so add a space in the beginning
-        # dec_input_ids = [*self.tokenizer.sot_sequence_including_notimestamps] + self.tokenizer.encode(" " + text)
-        dec_input_ids = [self.tokenizer.sot, 
+        # 針對每一個翻譯資料夾，取出翻譯文字
+        all_translations = []
+        for base_dir in self.translation_base_dirs:
+            t = self.get_translation_text(file_id, base_dir)
+            t = self.text_normalizer(t)  # 正規化
+            all_translations.append(t)
+        
+        # 假設先取一種翻譯做實驗
+        prompt_ids = [self.tokenizer.sot_prev] + \
+                    self.tokenizer.encode(" " + all_translations[0])
+
+        if len(prompt_ids) > MAX_PROMPT_LEN:
+            prompt_ids = prompt_ids[:MAX_PROMPT_LEN]
+
+        prompt_lens = len(prompt_ids)
+
+        dec_input_ids = prompt_ids + \
+                        [self.tokenizer.sot, 
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
                         self.tokenizer.encode(" " + text)
-        labels = dec_input_ids[1:] + [self.tokenizer.eot]
-        
-        # 處理兩個翻譯文本
-        translation_1 = self.get_translation_text(file_id, self.translation_base_dirs[0])
-        translation_1 = self.text_normalizer(translation_1)
 
-        translation_2 = None
-        if len(self.translation_base_dirs) > 1:
-            translation_2 = self.get_translation_text(file_id, self.translation_base_dirs[1])
-            translation_2 = self.text_normalizer(translation_2)       
+        labels = dec_input_ids[1:] + [self.tokenizer.eot]
+        labels[:prompt_lens - 1] = [-100] * (prompt_lens - 1) 
 
         return {
             "ids": file_id,
             "input_ids": mel,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translation_1": translation_1,
-            "translation_2": translation_2,
             "wav_lens": wav_lens,
+            "prompt_lens": prompt_lens,
         }
 
 ################################################################################
@@ -136,15 +140,13 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
 
 class CollatorWhithPadding_librispeech_pseudo:
     def __call__(self, features):
-        ids, input_ids, labels, dec_input_ids, translation_1, translation_2, wav_lens = [], [], [], [], [], [], []
+        ids, input_ids, labels, dec_input_ids, prompt_lens, wav_lens = [], [], [], [], [], []
         for f in features:
             ids.append(f["ids"])
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
-            translation_1.append(f["translation_1"])
-            if f.get("translation_2") is not None:
-                translation_2.append(f["translation_2"])
+            prompt_lens.append(f["prompt_lens"])
             wav_lens.append(f["wav_lens"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
@@ -165,16 +167,12 @@ class CollatorWhithPadding_librispeech_pseudo:
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translation_1": translation_1,
+            "prompt_lens": prompt_lens,
             "wav_lens": wav_lens,
         }
         
-        if translation_2:  # 如果 translation_2 存在，將其添加到 batch
-            batch["translation_2"] = translation_2
-
-        
         # 只將數值類型的項目轉換為張量
-        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
+        for key in ["input_ids", "labels", "dec_input_ids", "prompt_lens", "wav_lens"]:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
         
         return batch
@@ -209,11 +207,6 @@ def generate_pseudo_labels(cfg, split):
     teacher.to(device)
     teacher.eval()
 
-    # 載入 BERT (for xt_1)
-    bert_tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
-    bert_model = BertModel.from_pretrained('bert-base-multilingual-cased').to(device)
-    bert_model.eval()
-
     # 準備 Dataset & DataLoader
     dataset = LibriSpeechTextDataset_Pseudo(cfg,
                                         split,
@@ -242,60 +235,26 @@ def generate_pseudo_labels(cfg, split):
             input_ids = batch["input_ids"].to(device)  
             labels = batch["labels"].long().to(device)
             dec_input_ids = batch["dec_input_ids"].long().to(device) 
-            translation_1 = batch["translation_1"] 
+            prompt_lens = batch["prompt_lens"]
+ 
+            teacher_feat = teacher.encoder(input_ids)
+            teacher_out = teacher.decoder(dec_input_ids, teacher_feat)
 
-            bert_hidden_states_2 = None
-            translation_2 = batch.get("translation_2", None)
-            
-            # 1) BERT embedding (batch)
-            bert_inputs_1 = bert_tokenizer(
-                translation_1,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=448
-            ).to(device)
-            bert_outputs_1 = bert_model(**bert_inputs_1)
-            translation_embeddings_1 = bert_outputs_1.last_hidden_state
-
-            # 2) Teacher Forward
-            if translation_2 is not None:
-                # 取得翻譯 embeddings
-                bert_inputs_2 = bert_tokenizer(
-                    translation_2,
-                    return_tensors='pt',
-                    padding=True,
-                    truncation=True,
-                    max_length=448
-                ).to(device)
-                bert_outputs_2 = bert_model(**bert_inputs_2)
-                translation_embeddings_2 = bert_outputs_2.last_hidden_state
-            
-                teacher_feat = teacher.encoder(input_ids)
-                teacher_out = teacher.decoder(
-                    dec_input_ids, teacher_feat, xt_1=translation_embeddings_1, xt_2=translation_embeddings_2
-                )
-            else:
-                teacher_feat = teacher.encoder(input_ids)
-                teacher_out = teacher.decoder(
-                    dec_input_ids, teacher_feat, xt_1=translation_embeddings_1
-                )
-
-            labels[labels == -100] = tokenizer.eot
-
-            # 3) decode for each sample in batch
             tokens = torch.argmax(teacher_out, dim=2)  # [B, dec_len_max]
+
             eot_find = (torch.where(tokens == tokenizer.eot, 1, 0))
 
-            # 針對每個序列進行檢查
             for i in range(eot_find.shape[0]):
                 if torch.any(eot_find[i] == 1): 
                     first_eot = torch.argmax(torch.arange(eot_find.shape[1], 0, -1).cuda() * eot_find[i], dim=0, keepdim=True)
                     tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = tokenizer.eot
 
-            for i, (o, l) in enumerate(zip(tokens, labels)):
+            for i, (o, l, pl) in enumerate(zip(tokens, labels, prompt_lens)):
+                pl = pl.item()
+                o = o[pl:]
+                
                 decoded_o = tokenizer.decode([t.item() for t in o if t.item() not in special_token_set])
-                decoded_l = tokenizer.decode([t.item() for t in l if t.item() not in special_token_set])
+                decoded_l = tokenizer.decode([t.item() for t in l if t.item() not in special_token_set and t.item() != -100])
 
                 normalized_o = text_normalizer(decoded_o)
                 normalized_l = text_normalizer(decoded_l)

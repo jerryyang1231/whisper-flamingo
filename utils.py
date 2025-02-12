@@ -175,6 +175,42 @@ class WhisperDataCollatorWhithPadding_taigi:
 
         return batch
 
+class WhisperDataCollatorWhithPadding_kloka_crawled:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, wav_lens = [], [], [], []
+
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0)
+                    for audio, audio_len in zip(input_ids, audio_lengths)]
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) 
+                    for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) 
+                        for e, e_len in zip(dec_input_ids, dec_input_ids_length)]  # 50257 is eot token id
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "wav_lens": wav_lens, 
+        }
+
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
+
 class prompt_collator:
     def __call__(self, features):
         input_ids, labels, dec_input_ids, wav_lens, prompt_lens = [], [], [], [], []
@@ -260,7 +296,43 @@ class DistilPromptCollator:
 
         return batch
 
-class WhisperTextCollatorWhithPadding_taigi_with_bert:
+class WhisperTextCollatorWhithPadding_taigi:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, translations, wav_lens = [], [], [], [], []
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            translations.append(f["translations"])
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "translations": translations,
+            "wav_lens": wav_lens,
+        }
+        
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+
+        return batch
+    
+class WhisperTextCollatorWhithPadding_kloka_crawled:
     def __call__(self, features):
         input_ids, labels, dec_input_ids, translations, wav_lens = [], [], [], [], []
         for f in features:
@@ -338,6 +410,42 @@ class WhisperTextCollatorWhithPadding_librispeech_with_bert:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
         
         return batch
+    
+class Multiple_language_collator:
+    def __call__(self, features):
+        input_ids, labels, dec_input_ids, all_translations, wav_lens = [], [], [], [], []
+        for f in features:
+            input_ids.append(f["input_ids"])
+            labels.append(f["labels"])
+            dec_input_ids.append(f["dec_input_ids"])
+            all_translations.append(f["all_translations"])
+            wav_lens.append(f["wav_lens"])
+
+        audio_lengths = [audio.shape[1] for audio in input_ids]
+        max_audio_len = max(audio_lengths)
+        input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0) for audio, audio_len in zip(input_ids, audio_lengths)]
+
+        label_lengths = [len(lab) for lab in labels]
+        dec_input_ids_length = [len(e) for e in dec_input_ids]
+        max_label_len = max(label_lengths + dec_input_ids_length)
+
+        # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
+        labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
+        dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "all_translations": all_translations,
+            "wav_lens": wav_lens,
+        }
+        
+        # 只將數值類型的項目轉換為張量
+        for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
+            batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
+        
+        return batch
 
 def create_padding_mask(T, padding_amounts):
     """
@@ -382,7 +490,7 @@ def whisper_optimizer(model, cfg, t_total):
     return optimizer, scheduler
 
 def whisper_flamingo_optimizer(model, cfg, t_total):
-    x_attn = ["gated_x_attn", "attn_gate", "ff", "keyword_cross_attn"]
+    x_attn = ["gated_x_attn", "attn_gate", "ff"]
 
     optimizer_grouped_parameters = [
         {
@@ -390,7 +498,7 @@ def whisper_flamingo_optimizer(model, cfg, t_total):
                         if any(nd in n for nd in x_attn )],
             "lr": cfg.learning_rate,
         },
-    ]
+    ]    
     optimizer = AdamW(optimizer_grouped_parameters,
                         lr=cfg.learning_rate,
                         eps=cfg.adam_epsilon,
@@ -482,6 +590,23 @@ def setup_logging_and_checkpoint_taigi(log_output_dir, check_output_dir, train_n
     callback_list = [val_checkpoint,
                      LearningRateMonitor(logging_interval="step")]
     return tflogger, checkpoint_callback, callback_list
+
+def setup_logging_and_checkpoint_kloka_crawled(log_output_dir, check_output_dir, train_name, train_id, monitor, filename):
+    Path(log_output_dir).mkdir(exist_ok=True)
+    Path(check_output_dir).mkdir(exist_ok=True)
+    
+    val_checkpoint = ModelCheckpoint(
+        dirpath=f"{check_output_dir}/{train_id}",
+        filename=filename,
+        monitor=monitor,
+        mode='min',
+        save_top_k=3,
+        auto_insert_metric_name=False,
+    )
+
+    callback_list = [val_checkpoint,
+                     LearningRateMonitor(logging_interval="step")]
+    return callback_list
 
 def setup_logging_and_checkpoint_librispeech(log_output_dir, check_output_dir, train_name, train_id, monitor, filename):
     Path(log_output_dir).mkdir(exist_ok=True)

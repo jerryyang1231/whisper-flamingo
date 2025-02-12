@@ -56,11 +56,11 @@ class YTTDTaigiTRSDataset_Pseudo(Dataset):
     def __getitem__(self, id):
         lang = cfg.lang
         item = self.dataset[id]
-        wav_data = item['audio']['array'] 
+        wav_data = item['audio']['array']
         text = item['text']
         text_mandarin = item['text_mandarin']
         wav_lens = len(wav_data)
-        
+
         text = self.text_normalizer(text).replace(" ", "")
         text_mandarin = self.text_normalizer(text_mandarin).replace(" ", "")
 

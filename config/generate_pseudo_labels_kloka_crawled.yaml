@@ -1,0 +1,22 @@
+model_name: small
+audio_max_length: 480000
+dropout_rate: 0
+batch_size: 16
+num_worker: 16
+lang: id
+# config_names: "太魯閣"
+# config_names: "賽德克_德固達雅+賽德克_德鹿谷+賽德克_都達"
+config_names: "阿美_南勢+阿美_恆春+阿美_海岸+阿美_秀姑巒+阿美_馬蘭"
+# file_name: "truku"
+# file_name: "seediq"
+file_name: "amis"
+
+# Flamingo
+add_gated_x_attn: 1
+num_langs: 1
+
+# path
+# teacher_ckpt: 'whisper-flamingo_truku/step-11400-wer_at=0.0904.ckpt'
+# teacher_ckpt: 'whisper-flamingo_seediq (lr=5.0e-4)/step-57600-wer_at=0.1746.ckpt'
+teacher_ckpt: 'whisper-flamingo_amis (lr=5.0e-4)/step-86000-wer_at=0.1186.ckpt'
+output_dir: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/kloka_crawled/flamingo

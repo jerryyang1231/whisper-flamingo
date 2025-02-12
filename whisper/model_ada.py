@@ -1,7 +1,7 @@
 import base64
 import gzip
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, List
+from typing import Dict, Iterable, Optional
 
 import numpy as np
 import torch
@@ -109,43 +109,18 @@ class MultiHeadAttention(nn.Module):
         w = F.softmax(qk, dim=-1).to(q.dtype)
         return (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2), qk.detach()
 
-class GatedXAttnSubBlock(nn.Module):
-    def __init__(self, n_state: int, n_head: int):
-        """
-        n_state: decoder hidden dim
-        n_head:  number of attention heads
-        """
-        super().__init__()
-        self.attn = MultiHeadAttention(n_state, n_head)   # cross-attn
-        self.attn_ln = LayerNorm(n_state)                # layernorm for cross-attn
-        self.attn_gate = nn.Parameter(torch.tensor([0.]))    # scalar gate
-
-    def forward(self, x: Tensor, xt: Tensor) -> Tensor:
-        """
-        x:  [batch_size, seq_len, n_state] (Decoder 階段的隱藏表示)
-        xt: [batch_size, xt_seq_len, n_state] (某一種語言的翻譯 embedding)
-        回傳更新後的 x，但不在此做與「原始 x」的加總決策。
-        """
-        # 1) Cross-attn
-        x_ln = self.attn_ln(x)
-        attn_out, _ = self.attn(x_ln, xt)  # cross attention
-
-        # 使用一個 scalar gate 來控制 cross-attn 的影響力
-        x_i = attn_out * self.attn_gate.tanh()
-
-        return x_i
-
 class ResidualAttentionBlock(nn.Module):
     def __init__(self, n_state: int, n_head: int, cross_attention: bool = False, 
-                add_adapter: bool = False, adapter_dim: int = 256, add_gated_x_attn: int = 0,
-                num_langs: int = 0,
-                ):
+                 add_adapter: bool = False, adapter_dim: int = 256, add_gated_x_attn: int = 0,
+                 sequential_gated_x_attn: bool = False):
         super().__init__()
 
         self.attn = MultiHeadAttention(n_state, n_head)
         self.attn_ln = LayerNorm(n_state)
 
-        self.cross_attn = (MultiHeadAttention(n_state, n_head) if cross_attention else None)
+        self.cross_attn = (
+            MultiHeadAttention(n_state, n_head) if cross_attention else None
+        )
         self.cross_attn_ln = LayerNorm(n_state) if cross_attention else None
 
         n_mlp = n_state * 4
@@ -155,65 +130,68 @@ class ResidualAttentionBlock(nn.Module):
         self.mlp_ln = LayerNorm(n_state)
         
         self.add_gated_x_attn = add_gated_x_attn
-        self.num_langs = num_langs
-
         if self.add_gated_x_attn != 0:
-            print("add gated x attn layer")
-            self.gated_x_attn_layers = nn.ModuleList()
-            for i in range(num_langs):
-                subblock = GatedXAttnSubBlock(n_state, n_head)
-                self.gated_x_attn_layers.append(subblock)
-                
+            print("Adding gated x attn layers")
+            self.gated_x_attn_1 = MultiHeadAttention(n_state, n_head)
+            self.gated_x_attn_2 = MultiHeadAttention(n_state, n_head)
+
+            self.gated_x_attn_ln_1 = LayerNorm(n_state)
+            self.gated_x_attn_ln_2 = LayerNorm(n_state)
+
+            self.attn_gate_1 = nn.Parameter(torch.tensor([0.]))
+            self.attn_gate_2 = nn.Parameter(torch.tensor([0.]))
+
             self.ff_ln = LayerNorm(n_state)
             self.ff = nn.Sequential(
                 Linear(n_state, n_mlp), nn.GELU(), Linear(n_mlp, n_state)
             )
-            self.ff_gate = nn.Parameter(torch.tensor([0.])) 
+            self.ff_gate = nn.Parameter(torch.tensor([0.]))  
 
-    def apply_gated_x_attn_multi(self, x: Tensor, xt_list: List[Tensor]) -> Tensor:
-        """
-        做「並行（parallel）」的多語 gated x-attn:
-          - 所有語言子模組都使用同一個「原始 x」計算更新
-          - 再將所有的「更新量」加總回 x
-        x:       [batch_size, seq_len, n_state]
-        xt_list: List of [batch_size, xt_seq_len, n_state]
-        """
-        if len(xt_list) > self.num_langs:
-            raise ValueError(
-                f"Got {len(xt_list)} translations but only support up to {self.num_langs}"
-            )
+        # 新增的參數，用於控制是否使用順序的門控交叉注意力
+        self.sequential_gated_x_attn = sequential_gated_x_attn
 
-        # 以 x_origin 為原始輸入
-        x_origin = x
-
-        # 把所有子模組針對 x_origin 的更新量加總
-        total_delta = 0
-        for i, xt in enumerate(xt_list):
-            delta_i = self.gated_x_attn_layers[i](x_origin, xt)  # 回傳只是 attn_out * gate
-            total_delta += delta_i
-
-        # 再把 total_delta 加回 x_origin
-        x = x_origin + total_delta
-
-        # 接著如果要做一次 FF
+    def apply_gated_x_attn(self, x, xt):
+        x = x + self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt)[0] * self.attn_gate_1.tanh()
         x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
-        
         return x
     
+    def apply_gated_x_attn_parallel(self, x, xt_1, xt_2):
+        x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0] * self.attn_gate_1.tanh()
+        # x_1 = self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0]
+        x_2 = self.gated_x_attn_2(self.gated_x_attn_ln_2(x), xt_2)[0] * self.attn_gate_2.tanh()
+        x = x + x_1 + x_2
+        x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
+        return x
+    
+    def apply_gated_x_attn_sequential(self, x, xt_1, xt_2):
+        x = x + self.gated_x_attn_1(self.gated_x_attn_ln_1(x), xt_1)[0] * self.attn_gate_1.tanh()
+        x = x + self.gated_x_attn_2(self.gated_x_attn_ln_2(x), xt_2)[0] * self.attn_gate_2.tanh()
+        x = x + self.ff(self.ff_ln(x)) * self.ff_gate.tanh()
+        return x
+
     def forward(
         self,
         x: Tensor,
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
-        xt_list: Optional[List[Tensor]] = None,
+        xt_1: Optional[Tensor] = None,
+        xt_2: Optional[Tensor] = None
     ):
         if self.add_gated_x_attn != 0: 
-            x = self.apply_gated_x_attn_multi(x, xt_list)
+            if xt_2 is not None:
+                if self.sequential_gated_x_attn:
+                    # 使用順序的門控交叉注意力
+                    x = self.apply_gated_x_attn_sequential(x, xt_1, xt_2)
+                else:
+                    # 使用並行的門控交叉注意力
+                    x = self.apply_gated_x_attn_parallel(x, xt_1, xt_2)
+            else:
+                x = self.apply_gated_x_attn(x, xt_1)
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         if self.cross_attn:
             x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
-        x = x + self.mlp(self.mlp_ln(x))    
+        x = x + self.mlp(self.mlp_ln(x))        
         return x
 
 class AudioEncoder(nn.Module):
@@ -261,8 +239,8 @@ class AudioEncoder(nn.Module):
 
 class TextDecoder(nn.Module):
     def __init__(
-        self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float,
-        add_gated_x_attn: int, bert_hidden_size: int, num_langs: int,
+        self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dropout_rate: float, add_gated_x_attn: int,
+        bert_encoder: bool, bert_hidden_size: int, mode: str, sequential_gated_x_attn: bool
     ):
         super().__init__()
 
@@ -273,7 +251,7 @@ class TextDecoder(nn.Module):
             [
                 ResidualAttentionBlock(n_state, n_head, cross_attention=True, 
                                        add_gated_x_attn=add_gated_x_attn,
-                                       num_langs=num_langs,
+                                       sequential_gated_x_attn=sequential_gated_x_attn
                                        )
                 for _ in range(n_layer)
             ]
@@ -285,23 +263,23 @@ class TextDecoder(nn.Module):
         self.dropout_rate = dropout_rate
         self.dropout = torch.nn.Dropout(dropout_rate)     
 
-        # 如果 BERT hidden size 與 decoder 的維度不一致，需要線性投影
+        self.bert_encoder = bert_encoder
+        
         if bert_hidden_size != n_state:
             self.xt_projection = nn.Linear(bert_hidden_size, n_state)
         else:
             self.xt_projection = nn.Identity()  # 如果維度一致，則不需要投影 
+        
+        self.mode = mode
 
     def forward(self, x: Tensor, xa: Tensor, kv_cache: Optional[dict] = None, 
-                xt_list: Optional[List[Tensor]] = None,  # 多筆翻譯的 BERT hidden states
+                xt_1: Optional[Tensor] = None, xt_2: Optional[Tensor] = None,
         ):
         """
         x : torch.LongTensor, shape = (batch_size, <= n_ctx)
             the text tokens
         xa : torch.Tensor, shape = (batch_size, n_audio_ctx, n_audio_state)
             the encoded audio features to be attended on
-        xt_list: 
-            - 如果有 N 種翻譯，則是一個長度為 N 的 list。
-            - 每個元素 shape = (batch_size, seq_len_i, bert_hidden_size)
         """
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
         
@@ -311,25 +289,55 @@ class TextDecoder(nn.Module):
         )
         x = x.to(xa.dtype)
 
-        # 對多筆翻譯 xt_list 依序做投影、加 positional embedding
-        processed_xt_list = None
-        if xt_list is not None:
-            processed_xt_list = []
-            for xt in xt_list:
-                # 如果 BERT hidden size != n_state，要先投影
-                if xt.shape[-1] != x.shape[-1]:
-                    xt = self.xt_projection(xt)
+        # Process xt_1 and xt_2 based on the specified mode
+        if self.mode == "mix":            
+            # xt_1 without BERT and without positional embedding
+            if xt_1 is not None:
+                # No positional embedding for xt_1 in "mix" mode
+                xt_1 = xt_1.to(xa.dtype)
 
-                # 加 positional embedding
-                xt = xt + self.positional_embedding[offset : offset + xt.shape[1]]
+            # xt_2 with BERT and positional embedding
+            if xt_2 is not None:
+                if xt_2.shape[-1] != x.shape[-1]:
+                    xt_2 = self.xt_projection(xt_2)
+                xt_2 = xt_2 + self.positional_embedding[offset: offset + xt_2.shape[1]]
+                xt_2 = xt_2.to(xa.dtype)
+        elif self.mode == "translation":
+            # xt_1 with BERT and positional embedding
+            if xt_1 is not None:
+                if xt_1.shape[-1] != x.shape[-1]:
+                    xt_1 = self.xt_projection(xt_1)
+                xt_1 = xt_1 + self.positional_embedding[offset: offset + xt_1.shape[1]]
+                xt_1 = xt_1.to(xa.dtype)   
+        elif self.mode == "keyword":
+            # xt_1 without BERT and without positional embedding
+            if xt_1 is not None:
+                xt_1 = self.token_embedding(xt_1)
+                # No positional embedding for xt_1 in "keyword" mode
+                xt_1 = xt_1.to(xa.dtype)
+            
+            # # xt_1 without BERT and without positional embedding
+            # if xt_1 is not None:
+            #     # No positional embedding for xt_1 in "keyword" mode
+            #     xt_1 = xt_1.to(xa.dtype)
+        elif self.mode == "bilingual":
+            # xt_1 with BERT and positional embedding
+            if xt_1 is not None:
+                if xt_1.shape[-1] != x.shape[-1]:
+                    xt_1 = self.xt_projection(xt_1)
+                xt_1 = xt_1 + self.positional_embedding[offset: offset + xt_1.shape[1]]
+                xt_1 = xt_1.to(xa.dtype)
 
-                # 型別對齊
-                xt = xt.to(xa.dtype)
-                processed_xt_list.append(xt)
+            # xt_2 with BERT and positional embedding
+            if xt_2 is not None:
+                if xt_2.shape[-1] != x.shape[-1]:
+                    xt_2 = self.xt_projection(xt_2)
+                xt_2 = xt_2 + self.positional_embedding[offset: offset + xt_2.shape[1]]
+                xt_2 = xt_2.to(xa.dtype)
         
         # Pass through the layers
         for layer, block in enumerate(self.blocks):
-            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt_list=processed_xt_list)
+            x = block(x, xa, mask=self.mask, kv_cache=kv_cache, xt_1=xt_1, xt_2=xt_2)
         
         # Apply layer normalization
         x = self.ln(x)
@@ -343,8 +351,8 @@ class TextDecoder(nn.Module):
 
 class Whisper(nn.Module):
     def __init__(self, dims: ModelDimensions, dropout_rate: float, add_adapter: bool, adapter_dim: int,
-                add_gated_x_attn: int, bert_dim: int, num_langs: int,
-                ):
+                 add_gated_x_attn: int, bert_encoder: bool, bert_dim: int, mode: str,
+                 sequential_gated_x_attn: bool):
         super().__init__()
         self.dims = dims
         self.encoder = AudioEncoder(
@@ -365,8 +373,10 @@ class Whisper(nn.Module):
             self.dims.n_text_layer,
             dropout_rate,
             add_gated_x_attn,
+            bert_encoder,
             bert_dim,
-            num_langs,
+            mode,
+            sequential_gated_x_attn,
         )
 
 

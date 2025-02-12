@@ -7,8 +7,7 @@ lang: zh
 
 # Flamingo
 add_gated_x_attn: 1
-bert_encoder: true
-mode: translation
+num_langs: 1
 
 # path
 # teacher_ckpt: 'whisbert-flamingo_taigi_small/step-178000-cer_at=0.1617.ckpt'

@@ -27,12 +27,13 @@ lang: en
 resume_training: False
 
 teacher_ckpt: 'whisbert-flamingo_en-deu_small/step-284000-cer_at=0.0244-wer_at=0.0481.ckpt'
-train_id: distil-whisbert-flamingo_en-deu_small pseudo labels revise(db=12, lr=1.0e-6, bs=4)
+train_id: distil-whisbert-flamingo_en-deu_small pseudo labels revise (lr=1.0e-6)
 
 # flamingo
 add_gated_x_attn: 1 # 0 for False, 1 for True
 bert_encoder: True
-mode: "translation"
+mode: "monolingual"
+num_langs: 1
 
 # distil
 freeze_encoder: 1
@@ -40,9 +41,10 @@ alpha: 0.8
 beta: 1.0
 temperature: 2.0
 use_pseudo_labels: True
-# pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/librispeech/pseudo_labels_train.clean.100+train.clean.360+train.other.500.csv
+# wer_threshold: null
 
-
+# path
+pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/librispeech/flamingo/deu/pseudo_labels_train.clean.100+train.clean.360+train.other.500.csv
 translation_base_dirs:
   - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/German"
 

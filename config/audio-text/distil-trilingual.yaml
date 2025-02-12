@@ -5,15 +5,15 @@ accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 1000
+validate_every_n_batches: 2000
 num_devices: 1
 precision: 16-mixed
 
 model_name: small
-learning_rate: 1.25e-5 # small
+learning_rate: 1.0e-6
 batch_size: 4
-num_train_steps: 480000
-warmup_steps: 48000
+num_train_steps: 240000
+warmup_steps: 24000
 gradient_accumulation_steps: 1
 
 monitor: 'dev-other/wer_at'
@@ -26,19 +26,26 @@ dropout_rate: 0
 lang: en
 resume_training: False
 
-# pt_ckpt: 'whisper_en-x_small/step-27000-cer=0.0297-wer=0.0575.ckpt'
-pt_ckpt: 'whisbert-flamingo_en-cmn+en-deu_small/step-354000--wer_at=0.0465.ckpt'
-train_id: whisbert-flamingo_en-cmn+en-deu_small
+teacher_ckpt: 'trilingual/step-212000-wer_at=0.0449.ckpt'
+train_id: distil-trilingual
 
-# text
+# flamingo
 add_gated_x_attn: 1 # 0 for False, 1 for True
-bert_encoder: True
-mode: "bilingual"
-num_langs: 2
+num_langs: 3
 
+# distil
+freeze_encoder: 1
+alpha: 0.8
+beta: 1.0
+temperature: 2.0
+use_pseudo_labels: True
+
+# path
+pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/librispeech/flamingo/trilingual/pseudo_labels_train.clean.100+train.clean.360+train.other.500.csv
 translation_base_dirs:
   - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Mandarin Chinese"
   - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/German"
+  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/French"
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"

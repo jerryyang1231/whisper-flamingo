@@ -1,0 +1,61 @@
+train_name: whisper
+audio_max_length: 480000 # 30 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+# validate_every_n_batches: 100
+validate_every_n_batches: 300
+# validate_every_n_batches: 500
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 1.0e-6
+# batch_size: 16
+batch_size: 8
+# num_train_steps: 10000
+num_train_steps: 30000
+# num_train_steps: 50000
+# warmup_steps: 1000
+warmup_steps: 3000
+# warmup_steps: 5000
+gradient_accumulation_steps: 1
+
+monitor: 'eval/wer_at'
+noise_prob: 0.0
+noise_snr_train: 0
+
+dropout_rate: 0 
+
+lang: id
+# config_names: "太魯閣"
+config_names: "賽德克_德固達雅+賽德克_德鹿谷+賽德克_都達"
+# config_names: '阿美_南勢+阿美_恆春+阿美_海岸+阿美_秀姑巒+阿美_馬蘭'
+resume_training: False
+
+# teacher_ckpt: 'whisper-flamingo_truku/step-11400-wer_at=0.0904.ckpt'
+teacher_ckpt: 'whisper-flamingo_seediq (lr=5.0e-4)/step-57600-wer_at=0.1746.ckpt'
+# teacher_ckpt: 'whisper-flamingo_amis (lr=5.0e-4)/step-86000-wer_at=0.1186.ckpt'
+# train_id: distil-whisper-flamingo_truku
+train_id: distil-whisper-flamingo_seediq
+# train_id: distil-whisper-flamingo_amis
+
+# text
+add_gated_x_attn: 1 # 0 for False, 1 for True
+num_langs: 1
+
+# distil
+freeze_encoder: 1
+alpha: 0.8
+beta: 1.0
+temperature: 2.0
+use_pseudo_labels: True
+# pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/kloka_crawled/flamingo/truku_train.csv
+pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/kloka_crawled/flamingo/seediq_train.csv
+# pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/kloka_crawled/flamingo/amis_train.csv
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-wer_at={eval/wer_at:.4f}"

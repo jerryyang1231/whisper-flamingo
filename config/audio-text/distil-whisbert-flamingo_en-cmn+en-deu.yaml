@@ -33,8 +33,7 @@ train_id: distil-whisbert-flamingo_en-cmn+en-deu_small pseudo labels revise(db=1
 
 # flamingo
 add_gated_x_attn: 1 # 0 for False, 1 for True
-bert_encoder: True
-mode: "bilingual"
+num_langs: 2
 
 # distil
 freeze_encoder: 1
