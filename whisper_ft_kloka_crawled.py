@@ -24,7 +24,7 @@ from utils_batch_samplers import SortedBatchSampler
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from whisper.normalizers.basic import BasicTextNormalizer
-os.environ["WANDB_MODE"] = "disabled"
+# os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
@@ -112,7 +112,8 @@ class KlokaCrawledDataset(Dataset):
         language = item['language']
         dialect = item['dialect']
         wav_lens = len(wav_data)
-        
+        prompt = "_".join([language, dialect])
+
         # 使用 BasicTextNormalizer 正規化文本
         text = self.text_normalizer(text)
         
@@ -129,7 +130,7 @@ class KlokaCrawledDataset(Dataset):
         
         # 建立方言 prompt
         prompt_ids = [self.tokenizer.sot_prev] + \
-                    self.tokenizer.encode(" " + "_".join([language, dialect])) 
+                    self.tokenizer.encode(" " + prompt) 
         prompt_lens = len(prompt_ids)
 
         dec_input_ids = prompt_ids + \
@@ -145,6 +146,7 @@ class KlokaCrawledDataset(Dataset):
         return {
             "wav_lens": wav_lens,
             "input_ids": mel,
+            "prompt": prompt,
             "prompt_lens": prompt_lens,
             "dec_input_ids": dec_input_ids,
             "labels": labels,
@@ -203,6 +205,7 @@ class WhisperModelModule(LightningModule):
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
         prompt_lens = batch["prompt_lens"]
+        prompt = batch["prompt"][0]
 
         audio_features = self.model.encoder(input_ids)
         
@@ -244,9 +247,8 @@ class WhisperModelModule(LightningModule):
         o_list, l_list = [], []
         for idx, (o, l, pl) in enumerate(zip(tokens, labels, prompt_lens)):
             pl = pl.item()
-            
-            # 排除 prompt_ids 部分
             o = o[pl:]
+
             # 過濾掉特殊標籤和忽略的標籤
             o_filtered = [t for t in o if t.item() not in self.special_token_set]
             l_filtered = [t for t in l if t.item() not in self.special_token_set and t.item() != -100]
@@ -270,11 +272,11 @@ class WhisperModelModule(LightningModule):
             print("REF:  {}".format(ref))
             if i == 1: break
         
-        log_prefix = 'eval'
-        self.log("{}/loss".format(log_prefix), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("{}/cer".format(log_prefix), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("{}/wer".format(log_prefix), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("{}/acc".format(log_prefix), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        log_prefix = f"eval_{prompt}"
+        self.log(f"{log_prefix}/loss", loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{log_prefix}/cer", cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{log_prefix}/wer", wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        self.log(f"{log_prefix}/acc", acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
                 
         return {
             "cer": cer,
@@ -402,7 +404,6 @@ for config_name, dl in eval_dataloaders.items():
     print(f"Results for {config_name}: {result}")
 
 trainer.fit(model, val_dataloaders=list(eval_dataloaders.values()))
-
 
 # End the WandB run
 wandb.finish()

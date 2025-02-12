@@ -213,13 +213,14 @@ class WhisperDataCollatorWhithPadding_kloka_crawled:
 
 class prompt_collator:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, wav_lens, prompt_lens = [], [], [], [], []
+        input_ids, labels, dec_input_ids, wav_lens, prompt, prompt_lens = [], [], [], [], [], []
 
         for f in features:
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
             wav_lens.append(f["wav_lens"])
+            prompt.append(f["prompt"])
             prompt_lens.append(f["prompt_lens"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
@@ -242,6 +243,7 @@ class prompt_collator:
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "wav_lens": wav_lens,
+            "prompt": prompt,
             "prompt_lens": prompt_lens,
         }
 
