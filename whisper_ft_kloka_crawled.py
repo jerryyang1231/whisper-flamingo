@@ -11,7 +11,6 @@ import whisper
 from pytorch_lightning import LightningModule, Trainer, seed_everything
 from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
-from spec_augment import spec_augment
 from utils import (
     add_noise,
     prompt_collator,
@@ -24,8 +23,10 @@ from utils_batch_samplers import SortedBatchSampler
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from whisper.normalizers.basic import BasicTextNormalizer
+from datasets.download.download_config import DownloadConfig
 # os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+# os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "86400"
 
 # my command
 # python -u whisper_ft_kloka_crawled.py config/audio/kloka_crawled.yaml
@@ -34,10 +35,11 @@ SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 HF_TOKEN = "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"
+# download_config = DownloadConfig(timeout=86400)
 
 class KlokaCrawledDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
-                 spec_augment, config_names, noise_prob=0, noise_fn=None) -> None:
+                config_names, noise_prob=0, noise_fn=None) -> None:
         super().__init__()
 
         # 根據 split 選擇不同的 dataset
@@ -53,19 +55,19 @@ class KlokaCrawledDataset(Dataset):
             ds = load_dataset(
                 dataset_name,
                 name=config_name,
-                split='train',  # 或根據需要改成 'eval'
-                use_auth_token=HF_TOKEN
+                split='train',
+                use_auth_token=HF_TOKEN,
+                # download_config=download_config
             )
 
             # 取得原始數據筆數
             original_count = len(ds)
-
             ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
 
             # 取得過濾後的數據筆數
             filtered_count = len(ds)
             self.dataset = ds
-            print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
+            # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
             print(f"{split} set for '{config_name}' size: {len(self.dataset)}")
         else:
             # 訓練時使用多個 config 的合併
@@ -76,17 +78,17 @@ class KlokaCrawledDataset(Dataset):
                     dataset_name,
                     name=config_name,
                     split='train',
-                    use_auth_token=HF_TOKEN
+                    use_auth_token=HF_TOKEN,
+                    # download_config=download_config
                 )
 
                 # 取得原始數據筆數
                 original_count = len(ds)
-                
                 ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
+
                 # 取得過濾後的數據筆數
                 filtered_count = len(ds)
-                print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
-                print(f"Config '{config_name}': {len(ds)} samples")
+                # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
                 all_datasets.append(ds)
             self.dataset = concatenate_datasets(all_datasets)
             print(f"{split} set (merged) size: {len(self.dataset)}")
@@ -95,7 +97,6 @@ class KlokaCrawledDataset(Dataset):
         self.tokenizer = tokenizer
         self.model_name = model_name
         self.max_length = max_length
-        self.spec_augment = spec_augment
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
@@ -108,10 +109,11 @@ class KlokaCrawledDataset(Dataset):
         item = self.dataset[id]
 
         wav_data = item['audio']['array']
+        wav_lens = len(wav_data)
+        
         text = item['text']
         language = item['language']
         dialect = item['dialect']
-        wav_lens = len(wav_data)
         prompt = "_".join([language, dialect])
 
         # 使用 BasicTextNormalizer 正規化文本
@@ -130,7 +132,7 @@ class KlokaCrawledDataset(Dataset):
         
         # 建立方言 prompt
         prompt_ids = [self.tokenizer.sot_prev] + \
-                    self.tokenizer.encode(" " + prompt) 
+                    self.tokenizer.encode(" " + prompt)
         prompt_lens = len(prompt_ids)
 
         dec_input_ids = prompt_ids + \
@@ -139,7 +141,7 @@ class KlokaCrawledDataset(Dataset):
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
                         self.tokenizer.encode(" " + text)
-        
+
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
         labels[:prompt_lens - 1] = [-100] * (prompt_lens - 1)
 
@@ -200,7 +202,11 @@ class WhisperModelModule(LightningModule):
         
         return loss
 
-    def validation_step(self, batch, batch_id):
+    def on_validation_epoch_start(self) -> None:
+        # 使用一個字典來儲存每個 dataloader 的結果，key 為 dataloader_idx
+        self._val_outputs = {}
+
+    def validation_step(self, batch, batch_id, dataloader_idx=None):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
@@ -208,12 +214,10 @@ class WhisperModelModule(LightningModule):
         prompt = batch["prompt"][0]
 
         audio_features = self.model.encoder(input_ids)
-        
         out = self.model.decoder(dec_input_ids, audio_features)
-
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         
-        labels[labels == -100] = self.tokenizer.eot
+        # labels[labels == -100] = self.tokenizer.eot
         tokens = torch.argmax(out, dim=2)
 
         # Set all decoder predictions after first eot to eot
@@ -235,6 +239,7 @@ class WhisperModelModule(LightningModule):
                     first_eot = pl + eot_positions[0].item()
                 # 從 first_eot+1 開始填上 eot (50257) 避免 decode 到 padding 區
                 tokens[i, first_eot + 1:] = self.tokenizer.eot
+
         # 計算準確率，忽略 -100 的位置
         mask = (labels != -100) & (labels != self.tokenizer.eot)
         n_correct = torch.sum(
@@ -252,6 +257,7 @@ class WhisperModelModule(LightningModule):
             # 過濾掉特殊標籤和忽略的標籤
             o_filtered = [t for t in o if t.item() not in self.special_token_set]
             l_filtered = [t for t in l if t.item() not in self.special_token_set and t.item() != -100]
+
             # 解碼
             decoded_o = self.tokenizer.decode(o_filtered)
             decoded_l = self.tokenizer.decode(l_filtered)
@@ -271,18 +277,48 @@ class WhisperModelModule(LightningModule):
             print("PRED: {}".format(hypo))
             print("REF:  {}".format(ref))
             if i == 1: break
-        
+
         log_prefix = f"eval_{prompt}"
         self.log(f"{log_prefix}/loss", loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log(f"{log_prefix}/cer", cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log(f"{log_prefix}/wer", wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log(f"{log_prefix}/acc", acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-                
-        return {
-            "cer": cer,
-            "wer": wer,
-            "loss": loss
-        }
+
+        # 組成一個結果 dict（你也可以根據需要加入其他指標）
+        result = {
+                "loss": loss,
+                "wer": wer,
+                "cer": cer,
+                "acc": acc,
+            }
+        
+        # 將結果存到 _val_outputs 中，依據 dataloader_idx 進行區分
+        if dataloader_idx not in self._val_outputs:
+            self._val_outputs[dataloader_idx] = []
+        self._val_outputs[dataloader_idx].append(result)
+        
+        return result
+
+    def on_validation_epoch_end(self) -> None:
+        total_wer = 0.0
+        num_dataloaders = 0
+
+        # 遍歷每個 dataloader 的驗證結果
+        for dl_idx, outputs in self._val_outputs.items():
+            if len(outputs) == 0:
+                continue
+            # 計算該 dataloader 的平均 WER
+            avg_wer_dl = sum(x["wer"] for x in outputs) / len(outputs)
+            total_wer += avg_wer_dl
+            num_dataloaders += 1
+
+        overall_avg_wer = total_wer / num_dataloaders if num_dataloaders > 0 else 0.0
+
+        # 記錄整體平均 WER，作為 checkpoint 監控指標
+        self.log("avg_eval/wer", overall_avg_wer, prog_bar=True, logger=True, sync_dist=True)
+
+        # 若有需要，也可在此清除 self._val_outputs
+        self._val_outputs = {}
 
     def configure_optimizers(self):
         model = self.model
@@ -301,7 +337,6 @@ class WhisperModelModule(LightningModule):
                                     SAMPLE_RATE,
                                     self.model_name,
                                     max_length=self.cfg.audio_max_length,
-                                    spec_augment=self.cfg.spec_augment,
                                     config_names=self.cfg.config_names,
                                     noise_prob=self.cfg.noise_prob
                                     )   
@@ -333,7 +368,6 @@ class WhisperModelModule(LightningModule):
                                         SAMPLE_RATE,
                                         self.model_name,
                                         max_length=self.cfg.audio_max_length,
-                                        spec_augment=False,
                                         config_names=config_name,  # 傳入單一配置
                                         noise_prob=0
                                         )
@@ -351,59 +385,60 @@ class WhisperModelModule(LightningModule):
             dataloaders[config_name] = dataloader
         return dataloaders
 
-cfg_yaml = sys.argv[1]
-with open(cfg_yaml, 'r') as file:
-    dct = yaml.safe_load(file)
-    cfg = types.SimpleNamespace(**dct)
+if __name__ == "__main__":
+    cfg_yaml = sys.argv[1]
+    with open(cfg_yaml, 'r') as file:
+        dct = yaml.safe_load(file)
+        cfg = types.SimpleNamespace(**dct)
 
-print(cfg)
-print("audio max length: {}".format(cfg.audio_max_length))
+    print(cfg)
+    print("audio max length: {}".format(cfg.audio_max_length))
 
-# Initialize WandB
-wandb.init(project="whisper-flamingo",
-            config=cfg,
-            name="whisper_finetune_kloka_crawled"
-)
+    # Initialize WandB
+    wandb.init(project="whisper-flamingo",
+                config=cfg,
+                name="whisper finetune kloka crawled"
+    )
 
-callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 
-                                                            cfg.check_output_dir, 
-                                                            cfg.train_name, 
-                                                            cfg.train_id,
-                                                            cfg.monitor,
-                                                            cfg.filename
-                                                            )
+    callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 
+                                                                cfg.check_output_dir, 
+                                                                cfg.train_name, 
+                                                                cfg.train_id,
+                                                                cfg.monitor,
+                                                                cfg.filename
+                                                                )
 
-model = WhisperModelModule(cfg, cfg.model_name, cfg.lang)
+    model = WhisperModelModule(cfg, cfg.model_name, cfg.lang)
 
-# Create a WandB logger instance
-wandb_logger = WandbLogger()
+    # Create a WandB logger instance
+    wandb_logger = WandbLogger()
 
-strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
-trainer = Trainer(
-    precision=cfg.precision,
-    strategy=strategy,
-    accelerator="gpu",
-    max_steps=cfg.num_train_steps,
-    accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    logger=wandb_logger,
-    callbacks=callback_list,
-    num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
-    devices=cfg.num_devices,
-    val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-    check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
-    reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-    use_distributed_sampler=False, # implemented custom distributed trainer
-)
+    strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
+    trainer = Trainer(
+        precision=cfg.precision,
+        strategy=strategy,
+        accelerator="gpu",
+        max_steps=cfg.num_train_steps,
+        accumulate_grad_batches=cfg.gradient_accumulation_steps,
+        logger=wandb_logger,
+        callbacks=callback_list,
+        num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
+        devices=cfg.num_devices,
+        val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
+        check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
+        reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
+        use_distributed_sampler=False, # implemented custom distributed trainer
+        sync_batchnorm=True,
+    )
 
-print(cfg)
+    print(cfg)
+    # eval_dataloaders = model.val_dataloaders()
+    # for config_name, dl in eval_dataloaders.items():
+    #     print(f"Evaluating config: {config_name}")
+    #     trainer.validate(model=model, dataloaders=dl)
+    eval_dataloaders = list(model.val_dataloaders().values())
+    trainer.validate(model=model, dataloaders=eval_dataloaders)
+    trainer.fit(model, val_dataloaders=eval_dataloaders)
 
-eval_dataloaders = model.val_dataloaders()
-for config_name, dl in eval_dataloaders.items():
-    print(f"Evaluating config: {config_name}")
-    result = trainer.validate(model=model, dataloaders=dl)
-    print(f"Results for {config_name}: {result}")
-
-trainer.fit(model, val_dataloaders=list(eval_dataloaders.values()))
-
-# End the WandB run
-wandb.finish()
+    # End the WandB run
+    wandb.finish()

@@ -5,26 +5,27 @@ accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 400
-num_devices: 1
+validate_every_n_batches: 2000
+num_devices: 2
 precision: 16-mixed
 
 model_name: small
 learning_rate: 1.25e-5  # small
-batch_size: 2
-num_train_steps: 40000
-warmup_steps: 4000
+batch_size: 4
+num_train_steps: 200000
+warmup_steps: 20000
 gradient_accumulation_steps: 1
 
-monitor: 'eval/wer'
+monitor: 'avg_eval/wer'
 noise_prob: 0.0
 
-spec_augment: ""
 dropout_rate: 0
 
 lang: id
-config_names: 卑南_南王+卑南_建和+卑南_知本+卑南_西群+卡那卡那富+噶瑪蘭+太魯閣+布農_丹群+布農_卓群+布農_卡群+布農_巒群+布農_郡群+拉阿魯哇+排灣_中+排灣_北+排灣_南+排灣_東+撒奇萊雅+泰雅_四季+泰雅_宜蘭澤敖利+泰雅_汶水+泰雅_澤敖利+泰雅_萬大+泰雅_賽考利克+賽夏+賽德克_德固達雅+賽德克_德鹿谷+賽德克_都達+邵+鄒+阿美_南勢+阿美_恆春+阿美_海岸+阿美_秀姑巒+阿美_馬蘭+雅美+魯凱_多納+魯凱_大武+魯凱_東+魯凱_茂林+魯凱_萬山+魯凱_霧台
-eval_config_names: 卑南_南王+卑南_建和+卑南_知本+卑南_西群+卡那卡那富+噶瑪蘭+太魯閣+布農_丹群+布農_卓群+布農_卡群+布農_巒群+布農_郡群+拉阿魯哇+排灣_中+排灣_北+排灣_南+排灣_東+撒奇萊雅+泰雅_四季+泰雅_宜蘭澤敖利+泰雅_汶水+泰雅_澤敖利+泰雅_萬大+泰雅_賽考利克+賽夏+賽德克_德固達雅+賽德克_德鹿谷+賽德克_都達+邵+鄒+阿美_南勢+阿美_恆春+阿美_海岸+阿美_秀姑巒+阿美_馬蘭+雅美+魯凱_多納+魯凱_大武+魯凱_東+魯凱_茂林+魯凱_萬山+魯凱_霧台
+config_names: "卑南_南王+卑南_建和+卑南_知本+卑南_西群+卡那卡那富+噶瑪蘭+太魯閣+布農_丹群+布農_卓群+布農_卡群+布農_巒群+布農_郡群+拉阿魯哇+排灣_中+排灣_北+排灣_南+排灣_東+撒奇萊雅+泰雅_四季+泰雅_宜蘭澤敖利+泰雅_汶水+泰雅_澤敖利+泰雅_萬大+泰雅_賽考利克+賽夏+賽德克_德固達雅+賽德克_德鹿谷+賽德克_都達+邵+鄒+阿美_南勢+阿美_恆春+阿美_海岸+阿美_秀姑巒+阿美_馬蘭+雅美+魯凱_多納+魯凱_大武+魯凱_東+魯凱_茂林+魯凱_萬山+魯凱_霧台"
+# config_names: "卑南_南王+卑南_建和+卑南_知本+卑南_西群"
+eval_config_names: "卑南_南王+卑南_建和+卑南_知本+卑南_西群+卡那卡那富+噶瑪蘭+太魯閣+布農_丹群+布農_卓群+布農_卡群+布農_巒群+布農_郡群+拉阿魯哇+排灣_中+排灣_北+排灣_南+排灣_東+撒奇萊雅+泰雅_四季+泰雅_宜蘭澤敖利+泰雅_汶水+泰雅_澤敖利+泰雅_萬大+泰雅_賽考利克+賽夏+賽德克_德固達雅+賽德克_德鹿谷+賽德克_都達+邵+鄒+阿美_南勢+阿美_恆春+阿美_海岸+阿美_秀姑巒+阿美_馬蘭+雅美+魯凱_多納+魯凱_大武+魯凱_東+魯凱_茂林+魯凱_萬山+魯凱_霧台"
+# eval_config_names: "卑南_南王+卑南_建和+卑南_知本+卑南_西群"
 resume_training: false
 
 pt_ckpt: ''
@@ -32,4 +33,4 @@ train_id: whisper_finetune_kloka_crawled
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"
-filename: "step-{step:05d}-wer={eval/wer:.4f}"
+filename: "step-{step:05d}-wer={avg_eval/wer:.4f}"
