@@ -5,15 +5,15 @@ accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 2000
-num_devices: 2
+validate_every_n_batches: 1000
+num_devices: 4
 precision: 16-mixed
 
 model_name: small
 learning_rate: 1.25e-5  # small
 batch_size: 4
-num_train_steps: 200000
-warmup_steps: 20000
+num_train_steps: 100000
+warmup_steps: 10000
 gradient_accumulation_steps: 1
 
 monitor: 'avg_eval/wer'

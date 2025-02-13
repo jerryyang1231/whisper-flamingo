@@ -397,7 +397,7 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
                 config=cfg,
-                name="whisper finetune kloka crawled"
+                name="whisper finetune kloka crawled (sota)"
     )
 
     callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 
