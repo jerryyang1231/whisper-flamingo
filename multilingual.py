@@ -27,7 +27,10 @@ from whisper.normalizers.basic import BasicTextNormalizer
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from transformers import BertTokenizer, BertModel
-# os.environ["WANDB_MODE"] = "disabled"
+from fvcore.nn import FlopCountAnalysis
+from fvcore.nn import flop_count_table
+import time
+os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
@@ -36,7 +39,9 @@ os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 # python -u multilingual.py config/audio-text/monolingual_fra.yaml
 # python -u multilingual.py config/audio-text/monolingual_ita.yaml
 # python -u multilingual.py config/audio-text/bilingual.yaml
+# python -u multilingual.py config/audio-text/bilingual_top2.yaml
 # python -u multilingual.py config/audio-text/trilingual.yaml
+# python -u multilingual.py config/audio-text/trilingual_top3.yaml
 # python -u multilingual.py config/audio-text/quadrilingual.yaml
 # python -u multilingual.py config/audio-text/pentalingual.yaml
 
@@ -166,8 +171,7 @@ class LibriSpeechTextDataset(Dataset):
         }
 
 class WhisperTextModule(LightningModule):
-    def __init__(self, cfg, model_name, lang, train_split, val_clean_split, val_other_split,
-                 test_clean_split, test_other_split) -> None:
+    def __init__(self, cfg, model_name, lang) -> None:
         super().__init__()
         self.cfg = cfg
         self.model_name = model_name
@@ -198,21 +202,20 @@ class WhisperTextModule(LightningModule):
                 p.requires_grad = False
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language=cfg.lang, task='transcribe')
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
-
-        self.train_split = train_split
-        self.val_clean_split = val_clean_split
-        self.val_other_split = val_other_split
-        self.test_clean_split = test_clean_split
-        self.test_other_split = test_other_split
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
 
         # 初始化 BERT 分詞器和模型
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
         self.bert_model = BertModel.from_pretrained("bert-base-multilingual-cased")
-        
-    def forward(self, x):
-        return self.model(x)
+    
+    def forward(self, mel, tokens, xt_list=None):
+        encoder_out = self.model.encoder(mel)
+        if xt_list is not None:
+            decoder_out = self.model.decoder(tokens, encoder_out, xt_list=xt_list)
+        else:
+            decoder_out = self.model.decoder(tokens, encoder_out)
+        return decoder_out
 
     def training_step(self, batch, batch_id):
         input_ids = batch["input_ids"]
@@ -375,7 +378,7 @@ class WhisperTextModule(LightningModule):
             self.t_total = self.cfg.num_train_steps
 
     def train_dataloader(self):
-        dataset = LibriSpeechTextDataset(self.train_split, 
+        dataset = LibriSpeechTextDataset('train.clean.100+train.clean.360+train.other.500', 
                                     self.tokenizer, 
                                     SAMPLE_RATE,
                                     self.model_name,
@@ -400,15 +403,15 @@ class WhisperTextModule(LightningModule):
                           collate_fn=Multiple_language_collator())
 
     def val_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.val_clean_split,
-                                self.tokenizer, 
-                                SAMPLE_RATE,
-                                self.model_name,
-                                max_length=cfg.audio_max_length,
-                                spec_augment=False,
-                                noise_prob=0,
-                                translation_base_dirs=cfg.translation_base_dirs
-                                )
+        dataset = LibriSpeechTextDataset('validation.clean',
+                                        self.tokenizer, 
+                                        SAMPLE_RATE,
+                                        self.model_name,
+                                        max_length=cfg.audio_max_length,
+                                        spec_augment=False,
+                                        noise_prob=0,
+                                        translation_base_dirs=cfg.translation_base_dirs
+                                        )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -421,7 +424,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=Multiple_language_collator())
    
     def val_dataloader_other(self):
-        dataset = LibriSpeechTextDataset(self.val_other_split,
+        dataset = LibriSpeechTextDataset('validation.other',
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -442,7 +445,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=Multiple_language_collator())
     
     def test_dataloader_clean(self):
-        dataset = LibriSpeechTextDataset(self.test_clean_split,  
+        dataset = LibriSpeechTextDataset('test.clean',  
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -463,7 +466,7 @@ class WhisperTextModule(LightningModule):
                           collate_fn=Multiple_language_collator())
     
     def test_dataloader_other(self):
-        dataset = LibriSpeechTextDataset(self.test_other_split, 
+        dataset = LibriSpeechTextDataset('test.other', 
                                 self.tokenizer, 
                                 SAMPLE_RATE,
                                 self.model_name,
@@ -503,7 +506,9 @@ if __name__ == "__main__":
             # name="quadrilingual",
             # name="pentalingual",
             # name="monolingual_fra",
-            name="monolingual_ita",
+            # name="monolingual_ita",
+            # name="trilingual_top3"
+            name="bilingual_top2"
     )
     
     tflogger, callback_list = setup_logging_and_checkpoint_librispeech(cfg.log_output_dir, 
@@ -513,45 +518,92 @@ if __name__ == "__main__":
                                                                             cfg.monitor,
                                                                             cfg.filename)
         
-    model = WhisperTextModule(cfg, cfg.model_name, cfg.lang, 
-                            'train.clean.100+train.clean.360+train.other.500',
-                            'validation.clean',
-                            'validation.other',
-                            'test.clean',
-                            'test.other')
-    
-    # Create a WandB logger instance
-    wandb_logger = WandbLogger()
-    
-    strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
-    trainer = Trainer(
-        precision=cfg.precision,
-        strategy=strategy,
-        accelerator="gpu",
-        max_steps=cfg.num_train_steps,
-        accumulate_grad_batches=cfg.gradient_accumulation_steps,
-        logger=wandb_logger,
-        callbacks=callback_list,
-        num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
-        devices=cfg.num_devices,
-        val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-        check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
-        reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-        use_distributed_sampler=False, # implemented custom distributed trainer
-        sync_batchnorm=True,
-    )
+    model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
+    model.to("cuda")  # 確保所有權重都在 GPU
 
-    # TODO: save config file tp the checkpoint dir, also for pre-trained model
-    print(cfg)
-    resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
-    if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
-        trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                                model.test_dataloader_clean(), model.test_dataloader_other()])
-    else:
-        trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                                model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-        trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-                                            model.test_dataloader_clean(), model.test_dataloader_other()])
+    def count_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    # End the WandB run
-    wandb.finish()
+    num_params = count_parameters(model)
+    print(f"Total Trainable Parameters: {num_params / 1e6:.2f}M")
+
+    # 建立測試輸入
+    dummy_input = torch.randn(1, 80, 3000).to("cuda")  # (Batch, Mel, Time Frames)
+    dummy_tokens = torch.randint(0, 51865, (1, 30)).to("cuda")  # (Batch, Token Length)
+    # 假設有 4 種額外語言，每個 xt 的形狀假設為 [1, 50, 768] (batch_size, seq_len, hidden_size)
+    num_languages = 4
+    dummy_xt_list = [torch.randn(1, 50, 768).to("cuda") for _ in range(num_languages)]
+    
+    flop_analyzer = FlopCountAnalysis(model, (dummy_input, dummy_tokens, dummy_xt_list))
+    print(f"Total FLOPs: {flop_analyzer.total() / 1e9:.2f} GFLOPs")
+
+    def measure_inference_time(model, dummy_input, dummy_tokens, dummy_xt_list,  num_trials=10):
+        model.eval()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+        
+        # Warm-up
+        with torch.no_grad():
+            for _ in range(5):
+                _ = model(dummy_input, dummy_tokens, dummy_xt_list)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+        
+        # 開始計時 (使用 torch.cuda.Event 進行更精確計時)
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        start_event.record()
+        with torch.no_grad():
+            for _ in range(num_trials):
+                _ = model(dummy_input, dummy_tokens, dummy_xt_list)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+        end_event.record()
+        
+        # 等待所有事件完成
+        if device == "cuda":
+            torch.cuda.synchronize()
+        
+        total_time_ms = start_event.elapsed_time(end_event)
+        avg_time = total_time_ms / num_trials
+        print(f"Average Inference Time per sample: {avg_time:.2f} ms")
+        
+    # 假設 dummy_input 和 dummy_tokens 已正確準備
+    measure_inference_time(model, dummy_input, dummy_tokens, dummy_xt_list)
+    
+    # # Create a WandB logger instance
+    # wandb_logger = WandbLogger()
+    
+    # strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
+    # trainer = Trainer(
+    #     precision=cfg.precision,
+    #     strategy=strategy,
+    #     accelerator="gpu",
+    #     max_steps=cfg.num_train_steps,
+    #     accumulate_grad_batches=cfg.gradient_accumulation_steps,
+    #     logger=wandb_logger,
+    #     callbacks=callback_list,
+    #     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
+    #     devices=cfg.num_devices,
+    #     val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
+    #     check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
+    #     reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
+    #     use_distributed_sampler=False, # implemented custom distributed trainer
+    #     sync_batchnorm=True,
+    # )
+
+    # # TODO: save config file tp the checkpoint dir, also for pre-trained model
+    # print(cfg)
+    # resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
+    # if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
+    #     trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+    #                                             model.test_dataloader_clean(), model.test_dataloader_other()])
+    # else:
+    #     # trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+    #                                             # model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
+    #     trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+    #                                         model.test_dataloader_clean(), model.test_dataloader_other()])
+
+    # # End the WandB run
+    # wandb.finish()

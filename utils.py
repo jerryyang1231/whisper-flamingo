@@ -213,7 +213,7 @@ class WhisperDataCollatorWhithPadding_kloka_crawled:
 
 class prompt_collator:
     def __call__(self, features):
-        input_ids, labels, dec_input_ids, wav_lens, prompt, prompt_lens = [], [], [], [], [], []
+        input_ids, labels, dec_input_ids, wav_lens, prompt, prompt_lens, translations = [], [], [], [], [], [], []
 
         for f in features:
             input_ids.append(f["input_ids"])
@@ -222,6 +222,8 @@ class prompt_collator:
             wav_lens.append(f["wav_lens"])
             prompt.append(f["prompt"])
             prompt_lens.append(f["prompt_lens"])
+            if f.get("translations") is not None:
+                translations.append(f["translations"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
@@ -246,6 +248,9 @@ class prompt_collator:
             "prompt": prompt,
             "prompt_lens": prompt_lens,
         }
+        
+        if translations:
+            batch["translations"] = translations
 
         for key in ["input_ids", "labels", "dec_input_ids", "wav_lens", "prompt_lens"]:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)

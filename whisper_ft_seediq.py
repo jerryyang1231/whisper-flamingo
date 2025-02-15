@@ -20,9 +20,9 @@ from utils import (
     DistributedSamplerWrapper,
 )
 from utils_batch_samplers import SortedBatchSampler
+from whisper.normalizers.basic import BasicTextNormalizer
 import wandb
 from pytorch_lightning.loggers import WandbLogger
-from whisper.normalizers.basic import BasicTextNormalizer
 os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
@@ -91,7 +91,7 @@ class KlokaCrawledSeediqDataset(Dataset):
         item = self.dataset[id]
 
         wav_data = item['audio']['array']
-        text = item['text']        
+        text = item['text']
         wav_lens = len(wav_data)
         
         # 使用 BasicTextNormalizer 正規化文本
@@ -131,7 +131,8 @@ class WhisperModelModule(LightningModule):
         self.model = whisper.load_model(model_name,
                                         device='cpu', # avoid OOM on gpu 0 for distributed
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
-                                        dropout_rate=cfg.dropout_rate)
+                                        dropout_rate=cfg.dropout_rate
+                                        )
 
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
@@ -146,7 +147,7 @@ class WhisperModelModule(LightningModule):
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False)
 
-        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='id', task='transcribe')
+        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language=cfg.lang, task='transcribe')
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
         self.special_token_set = set(self.tokenizer.special_tokens.values())
@@ -203,7 +204,7 @@ class WhisperModelModule(LightningModule):
             decoded_o = self.tokenizer.decode([t for t in o if t.item() not in self.special_token_set])
             decoded_l = self.tokenizer.decode([t for t in l if t.item() not in self.special_token_set])
             
-            # 正規化文本並移除空格
+            # 正規化文本
             normalized_o = self.text_normalizer(decoded_o)
             normalized_l = self.text_normalizer(decoded_l)
 
@@ -214,13 +215,14 @@ class WhisperModelModule(LightningModule):
         wer, cer = wer_cer(hypo=o_list, ref=l_list)
 
         for i, (hypo, ref) in enumerate(zip(o_list, l_list)):
-            print("-"*10)
+            print("="*100)
             print("PRED: {}".format(hypo))
             print("REF:  {}".format(ref))
             if i == 1: break
         
         log_prefix = 'eval'
         self.log("{}/loss".format(log_prefix), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        self.log("{}/cer".format(log_prefix), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/wer".format(log_prefix), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/acc".format(log_prefix), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
                 
@@ -250,7 +252,7 @@ class WhisperModelModule(LightningModule):
                                     spec_augment=self.cfg.spec_augment,
                                     config_names=self.cfg.config_names,
                                     noise_prob=self.cfg.noise_prob
-                                    )   
+                                    )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],

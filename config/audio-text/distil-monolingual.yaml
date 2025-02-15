@@ -43,7 +43,7 @@ use_pseudo_labels: True
 # path
 pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/librispeech/flamingo/monolingual/pseudo_labels_train.clean.100+train.clean.360+train.other.500.csv
 translation_base_dirs:
-  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Mandarin Chinese"
+  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Chinese"
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"

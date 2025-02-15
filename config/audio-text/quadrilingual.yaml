@@ -27,6 +27,7 @@ lang: en
 resume_training: False
 
 pt_ckpt: 'whisper_en-x_small/step-27000-cer=0.0297-wer=0.0575.ckpt'
+# pt_ckpt: 'quadrilingual/step-284000-wer_at=0.0424.ckpt'
 train_id: quadrilingual
 
 # flamingo

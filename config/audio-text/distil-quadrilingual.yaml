@@ -27,6 +27,7 @@ lang: en
 resume_training: False
 
 teacher_ckpt: 'quadrilingual/step-284000-wer_at=0.0424.ckpt'
+student_ckpt: 'distil-quadrilingual/step-176000-wer_at=0.0536.ckpt'
 train_id: distil-quadrilingual
 
 # flamingo
