@@ -191,9 +191,8 @@ def generate_pseudo_labels(cfg, split):
                                 download_root='/share/nas169/jerryyang/whisper-flamingo/models',
                                 dropout_rate = cfg.dropout_rate,
                                 add_gated_x_attn = cfg.add_gated_x_attn,
-                                bert_encoder = cfg.bert_encoder,
-                                mode = cfg.mode,
-                            )
+                                num_langs = cfg.num_langs,
+                                )
 
     # 如果有 teacher_ckpt
     if cfg.teacher_ckpt != '':
@@ -218,7 +217,8 @@ def generate_pseudo_labels(cfg, split):
                     sort_in_batch='descending',
                     sort_batch='descending',
                     drop_last=False)
-    loader = DataLoader(dataset,
+    loader = DataLoader(
+                    dataset,
                     batch_size=cfg.batch_size,
                     num_workers=cfg.num_worker,
                     collate_fn=CollatorWhithPadding_librispeech_pseudo(),
@@ -269,11 +269,12 @@ def generate_pseudo_labels(cfg, split):
                 })
 
     # 寫入 CSV
+    output_dir = cfg.output_dir
+    os.makedirs(output_dir, exist_ok=True)
     csv_name = os.path.join(cfg.output_dir, f"pseudo_labels_{split}.csv")
     df = pd.DataFrame(results)
     df.to_csv(csv_name, index=False, encoding="utf-8")
     print(f"Done! Pseudo labels saved to: {csv_name}")
-
 
 ################################################################################
 # 4. Main

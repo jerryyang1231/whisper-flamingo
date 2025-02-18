@@ -24,8 +24,8 @@ from utils_batch_samplers import SortedBatchSampler
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from whisper.normalizers.basic import BasicTextNormalizer
-from datasets.download.download_config import DownloadConfig
 from transformers import BertModel, BertTokenizer
+import torch.distributed as dist
 # os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
@@ -38,7 +38,7 @@ seed_everything(SEED, workers=True)
 HF_TOKEN = "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"
 
 class KlokaCrawledDataset(Dataset):
-    def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
+    def __init__(self, split, tokenizer, sample_rate, model_name, lang, max_length, 
                 config_names, noise_prob=0, noise_fn=None) -> None:
         super().__init__()
 
@@ -94,6 +94,7 @@ class KlokaCrawledDataset(Dataset):
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
         self.model_name = model_name
+        self.lang = lang
         self.max_length = max_length
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
@@ -103,7 +104,7 @@ class KlokaCrawledDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, id):
-        lang = cfg.lang
+        lang = self.lang
         item = self.dataset[id]
 
         wav_data = item['audio']['array']
@@ -117,7 +118,7 @@ class KlokaCrawledDataset(Dataset):
         # 使用 BasicTextNormalizer 正規化文本
         text = self.text_normalizer(text)
         chinese = self.text_normalizer(chinese)
-        
+
         if np.random.rand() > self.noise_prob: # 不加噪音
             audio = wav_data.flatten().astype(np.float32)
         else: # 加噪音
@@ -128,7 +129,7 @@ class KlokaCrawledDataset(Dataset):
 
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
-        
+
         # 建立方言 prompt
         prompt_ids = [self.tokenizer.sot_prev] + \
                     self.tokenizer.encode(" " + prompt)
@@ -180,7 +181,7 @@ class WhisperTextModule(LightningModule):
                 print(str(e))
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False)
-                
+
         if cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
             for p in self.model.encoder.parameters():
                 p.requires_grad = False
@@ -216,7 +217,7 @@ class WhisperTextModule(LightningModule):
         # 通過 BERT 模型獲取輸出
         bert_outputs = self.bert_model(**bert_inputs)
         xt = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
-        
+
         audio_features = self.model.encoder(input_ids)
 
         # 將 BERT 輸出作為 xt 傳遞給解碼器
@@ -263,7 +264,7 @@ class WhisperTextModule(LightningModule):
             loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
             # remove all decoder predictions after first eot for proper decoding
             tokens = torch.argmax(out, dim=2)
-        
+
             # Set all decoder predictions after first eot to eot
             for i in range(tokens.size(0)):
                 pl = prompt_lens[i].item()  # prompt_lens[i] 是當前樣本的prompt長度
@@ -292,7 +293,7 @@ class WhisperTextModule(LightningModule):
             total = torch.sum(mask)
             acc = n_correct.item() / (total.item() + 1e-6)
             acc = acc if acc < 1 else 0
-        
+
             o_list, l_list = [], []
             for idx, (o, l, pl) in enumerate(zip(tokens, labels, prompt_lens)):
                 pl = pl.item()
@@ -384,10 +385,11 @@ class WhisperTextModule(LightningModule):
                                     self.tokenizer, 
                                     SAMPLE_RATE,
                                     self.model_name,
+                                    self.cfg.lang,
                                     max_length=self.cfg.audio_max_length,
                                     config_names=self.cfg.config_names,
                                     noise_prob=self.cfg.noise_prob
-                                    )   
+                                    )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -395,7 +397,7 @@ class WhisperTextModule(LightningModule):
                     sort_batch='descending',
                     drop_last=True
                     )
-        if cfg.num_devices > 1:
+        if self.cfg.num_devices > 1:
             print("Using distributed sampler")
             batch_sampler = DistributedSamplerWrapper(batch_sampler)
         return torch.utils.data.DataLoader(dataset,
@@ -403,7 +405,7 @@ class WhisperTextModule(LightningModule):
                         num_workers=self.cfg.num_worker,
                         collate_fn=prompt_collator()
                         )
-    
+
     def val_dataloaders(self):
         # 假設 self.cfg.eval_config_names 是一個加號分隔的字串，每個項目為單一配置名稱
         eval_configs = self.cfg.eval_config_names.split("+")
@@ -415,16 +417,18 @@ class WhisperTextModule(LightningModule):
                                         self.tokenizer,
                                         SAMPLE_RATE,
                                         self.model_name,
+                                        self.cfg.lang,
                                         max_length=self.cfg.audio_max_length,
                                         config_names=config_name,  # 傳入單一配置
                                         noise_prob=0
                                         )
-            batch_sampler = SortedBatchSampler(batch_size=self.cfg.batch_size,
-                                            shapes=[(item['wav_lens']) for item in dataset],
-                                            sort_in_batch='descending',
-                                            sort_batch='descending',
-                                            drop_last=False
-                                            )
+            batch_sampler = SortedBatchSampler(
+                                        batch_size=self.cfg.batch_size,
+                                        shapes=[(item['wav_lens']) for item in dataset],
+                                        sort_in_batch='descending',
+                                        sort_batch='descending',
+                                        drop_last=False
+                                        )
             dataloader = torch.utils.data.DataLoader(dataset,
                                                 batch_sampler=batch_sampler,
                                                 num_workers=self.cfg.num_worker,
@@ -442,12 +446,19 @@ if __name__ == "__main__":
     print(cfg)
     print("audio max length: {}".format(cfg.audio_max_length))
 
-    # Initialize WandB
-    wandb.init(project="whisper-flamingo",
-                config=cfg,
-                # name="whisper-flamingo kloka crawled"
-                name="whisper-flamingo_kloka_crawled_few_steps_test"
-    )
+    # 檢查 DDP 是否啟動，確保 Rank 0
+    if dist.is_initialized():
+        rank = dist.get_rank()
+    else:
+        rank = 0  # 單 GPU 模式下預設為 rank 0
+
+    # 只有 Rank 0 初始化 WandB
+    if rank == 0:
+        wandb.init(
+            project="whisper-flamingo",
+            config=cfg,
+            name="whisper-flamingo kloka crawled"
+        )
 
     callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 
                                                                 cfg.check_output_dir, 
@@ -460,7 +471,7 @@ if __name__ == "__main__":
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
 
     # Create a WandB logger instance
-    wandb_logger = WandbLogger()
+    wandb_logger = WandbLogger() if rank == 0 else None
 
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
@@ -485,5 +496,6 @@ if __name__ == "__main__":
     trainer.validate(model=model, dataloaders=eval_dataloaders)
     trainer.fit(model, val_dataloaders=eval_dataloaders)
 
-    # End the WandB run
-    wandb.finish()
+    # 只有 Rank 0 結束 WandB
+    if rank == 0:
+        wandb.finish()

@@ -509,88 +509,39 @@ if __name__ == "__main__":
                                                                             cfg.filename)
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
-    model.to("cuda")  # 確保所有權重都在 GPU
 
-    def count_parameters(model):
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    num_params = count_parameters(model)
-    print(f"Total Trainable Parameters: {num_params / 1e6:.2f}M")
-
-    # 建立測試輸入
-    dummy_input = torch.randn(1, 80, 3000).to("cuda")  # (Batch, Mel, Time Frames)
-    dummy_tokens = torch.randint(0, 51865, (1, 30)).to("cuda")  # (Batch, Token Length)
-
-    flop_analyzer = FlopCountAnalysis(model, (dummy_input, dummy_tokens))
-    print(f"Total FLOPs: {flop_analyzer.total() / 1e9:.2f} GFLOPs")
-
-    def measure_inference_time(model, dummy_input, dummy_tokens, num_trials=10):
-        model.eval()
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model.to(device)
-        
-        # Warm-up
-        with torch.no_grad():
-            for _ in range(5):
-                _ = model(dummy_input, dummy_tokens)
-                if device == "cuda":
-                    torch.cuda.synchronize()
-        
-        # 開始計時 (使用 torch.cuda.Event 進行更精確計時)
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-
-        start_event.record()
-        with torch.no_grad():
-            for _ in range(num_trials):
-                _ = model(dummy_input, dummy_tokens)
-                if device == "cuda":
-                    torch.cuda.synchronize()
-        end_event.record()
-        
-        # 等待所有事件完成
-        if device == "cuda":
-            torch.cuda.synchronize()
-        
-        total_time_ms = start_event.elapsed_time(end_event)
-        avg_time = total_time_ms / num_trials
-        print(f"Average Inference Time per sample: {avg_time:.2f} ms")
-        
-    # 假設 dummy_input 和 dummy_tokens 已正確準備
-    measure_inference_time(model, dummy_input, dummy_tokens)
-
-    # # Create a WandB logger instance
-    # wandb_logger = WandbLogger()
+    # Create a WandB logger instance
+    wandb_logger = WandbLogger()
     
-    # strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
-    # trainer = Trainer(
-    #     precision=cfg.precision,
-    #     strategy=strategy,
-    #     accelerator="gpu",
-    #     max_steps=cfg.num_train_steps,
-    #     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    #     logger=wandb_logger,
-    #     callbacks=callback_list,
-    #     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
-    #     devices=cfg.num_devices,
-    #     val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-    #     check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
-    #     reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-    #     use_distributed_sampler=False, # implemented custom distributed trainer
-    #     sync_batchnorm=True,
-    # )
+    strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
+    trainer = Trainer(
+        precision=cfg.precision,
+        strategy=strategy,
+        accelerator="gpu",
+        max_steps=cfg.num_train_steps,
+        accumulate_grad_batches=cfg.gradient_accumulation_steps,
+        logger=wandb_logger,
+        callbacks=callback_list,
+        num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
+        devices=cfg.num_devices,
+        val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
+        check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
+        reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
+        use_distributed_sampler=False, # implemented custom distributed trainer
+        sync_batchnorm=True,
+    )
 
-    # # TODO: save config file tp the checkpoint dir, also for pre-trained model
-    # print(cfg)
-    # resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
-    # if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
-    #     trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-    #                                             model.test_dataloader_clean(), model.test_dataloader_other()])
-    # else:
-    #     trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-    #                                             model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-    #     # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-    #     #                                     model.test_dataloader_clean(), model.test_dataloader_other()])
+    # TODO: save config file tp the checkpoint dir, also for pre-trained model
+    print(cfg)
+    resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
+    if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
+        trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                                model.test_dataloader_clean(), model.test_dataloader_other()])
+    else:
+        trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                                model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
+        # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+        #                                     model.test_dataloader_clean(), model.test_dataloader_other()])
 
-    # # End the WandB run
-    # wandb.finish()
+    # End the WandB run
+    wandb.finish()

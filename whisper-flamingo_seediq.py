@@ -370,10 +370,10 @@ if __name__ == "__main__":
                                                             )
         
     model = WhisperTextModule(cfg, cfg.model_name, cfg.lang)
-    
+
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
-    
+
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
         precision=cfg.precision,

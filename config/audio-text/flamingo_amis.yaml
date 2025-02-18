@@ -5,16 +5,16 @@ accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 1000
+validate_every_n_batches: 500
 num_devices: 1
 precision: 16-mixed
 
 model_name: small
-learning_rate: 3.0e-5
+learning_rate: 2.0e-5
 batch_size: 4
-num_train_steps: 100000
-warmup_steps: 15000
-gradient_accumulation_steps: 1
+num_train_steps: 50000
+warmup_steps: 5000
+gradient_accumulation_steps: 2
 
 monitor: 'eval/wer_at'
 noise_prob: 0.0
@@ -24,15 +24,19 @@ spec_augment: ""
 dropout_rate: 0
 
 lang: id
-config_names: '阿美_南勢+阿美_恆春+阿美_海岸+阿美_秀姑巒+阿美_馬蘭'
+config_names: '阿美_秀姑巒'
 resume_training: false
 
-pt_ckpt: 'whisper_finetune_amis/step-174000-wer=0.1215.ckpt'
-train_id: whisper-flamingo_amis (lr=3.0e-5, ws=15k)
+pt_ckpt: 'whisper_finetune_amis_siwkulan/step-19600-wer=0.1288.ckpt'
+# train_id: Trans-ASR_amis_siwkulan-ind
+train_id: Trans-ASR_amis_siwkulan-ind_tune_params
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
 num_langs: 1
+
+translation_csv_train: "/share/nas169/jerryyang/whisper-flamingo/translation/阿美_秀姑巒_translated_ind_train.csv"
+translation_csv_eval: "/share/nas169/jerryyang/whisper-flamingo/translation/阿美_秀姑巒_translated_ind_eval.csv"
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"

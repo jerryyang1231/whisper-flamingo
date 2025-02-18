@@ -23,15 +23,15 @@ spec_augment: ""
 dropout_rate: 0
 
 lang: id
-# config_names: '賽德克_德固達雅'
+config_names: '賽德克_德固達雅'
 # config_names: '賽德克_德鹿谷'
-config_names: '賽德克_都達'
+# config_names: '賽德克_都達'
 resume_training: false
 
-pt_ckpt: ''
-# train_id: whisper_finetune_seediq_tgdaya
+pt_ckpt: 'whisper_finetune_seediq_Tgdaya/step-31200-wer=0.1321.ckpt'
+train_id: whisper_finetune_seediq_tgdaya
 # train_id: whisper_finetune_seediq_truku
-train_id: whisper_finetune_seediq_toda
+# train_id: whisper_finetune_seediq_toda
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"

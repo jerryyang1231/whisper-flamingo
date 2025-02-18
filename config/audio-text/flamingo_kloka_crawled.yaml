@@ -6,14 +6,14 @@ weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
 validate_every_n_batches: 1000
-num_devices: 1
+num_devices: 2
 precision: 16-mixed
 
 model_name: small
-learning_rate: 5.0e-5
-batch_size: 2
-num_train_steps: 100000
-warmup_steps: 10000
+learning_rate: 1.0e-5
+batch_size: 8
+num_train_steps: 80000
+warmup_steps: 8000
 gradient_accumulation_steps: 1
 
 monitor: 'avg_eval/wer_at'
@@ -28,9 +28,10 @@ eval_config_names: "卑南_南王+卑南_建和+卑南_知本+卑南_西群+卡�
 # eval_config_names: "卑南_南王+卑南_建和+卑南_知本+卑南_西群"
 resume_training: false
 
-pt_ckpt: 'whisper_finetune_kloka_crawled/step-57000-wer=0.2351-v1.ckpt'
-# train_id: whisper-flamingo_kloka_crawled
-train_id: whisper-flamingo_kloka_crawled_few_steps_test
+pt_ckpt: 'whisper_finetune_kloka_crawled/step-96000-wer=0.2246.ckpt'
+# pt_ckpt: 'whisper_finetune_kloka_crawled/step-57000-wer=0.2351-v1.ckpt'
+train_id: whisper-flamingo_kloka_crawled
+# train_id: whisper-flamingo_kloka_crawled_few_steps_test
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True

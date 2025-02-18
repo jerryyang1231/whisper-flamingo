@@ -20,3 +20,6 @@ plot/
 keyword_exp/
 pseudo_labels/
 old_stuff/
+preparation/
+notebooks/
+moved_ckpt/

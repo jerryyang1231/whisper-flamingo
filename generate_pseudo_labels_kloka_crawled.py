@@ -30,7 +30,7 @@ class KlokaCrawledDataset(Dataset):
 
         # 根據 split 選擇不同的 dataset
         dataset_name = "formospeech/kloka_crawled_asr_train" if split == 'train' else "formospeech/kloka_crawled_asr_eval"
-        
+
         # 將 config_names 轉為列表
         config_names = cfg.config_names
         if isinstance(config_names, str):

@@ -36,13 +36,14 @@ import pandas as pd
 from fvcore.nn import FlopCountAnalysis
 from fvcore.nn import flop_count_table
 import time
-os.environ["WANDB_MODE"] = "disabled"
+# os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
 # python -u distil-whisper-flamingo_librispeech.py config/audio-text/distil-monolingual.yaml
 # python -u distil-whisper-flamingo_librispeech.py config/audio-text/distil-monolingual_deu.yaml
 # python -u distil-whisper-flamingo_librispeech.py config/audio-text/distil-monolingual_fra.yaml
+# python -u distil-whisper-flamingo_librispeech.py config/audio-text/distil-monolingual_ita.yaml
 # python -u distil-whisper-flamingo_librispeech.py config/audio-text/distil-bilingual.yaml
 # python -u distil-whisper-flamingo_librispeech.py config/audio-text/distil-trilingual.yaml
 # python -u distil-whisper-flamingo_librispeech.py config/audio-text/distil-quadrilingual.yaml
@@ -230,32 +231,32 @@ class DistillWhisperModule(LightningModule):
                                         dropout_rate=cfg.dropout_rate,
                                         )
 
-        # test student
-        if cfg.student_ckpt != '': # load audio-only FT ckpt
-            checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
-            checkpoint = torch.load(os.path.join(checkpoint_root, cfg.student_ckpt), map_location=torch.device('cpu'))
-            state_dict = checkpoint["state_dict"] 
-            student_only_sd = {}
-            for k, v in state_dict.items():
-                # 保留 student. 開頭
-                if k.startswith("student."):
-                    new_k = k[len("student."):]  # 去除前綴
-                    student_only_sd[new_k] = v
-            # print(student_only_sd.keys())
-            try:
-                self.student.load_state_dict(student_only_sd) 
-            except BaseException as e: 
-                print(str(e))
-                print("Loading weights with strict=False")
-                self.student.load_state_dict(student_only_sd, strict=False) 
+        # # test student
+        # if cfg.student_ckpt != '': # load audio-only FT ckpt
+        #     checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
+        #     checkpoint = torch.load(os.path.join(checkpoint_root, cfg.student_ckpt), map_location=torch.device('cpu'))
+        #     state_dict = checkpoint["state_dict"] 
+        #     student_only_sd = {}
+        #     for k, v in state_dict.items():
+        #         # 保留 student. 開頭
+        #         if k.startswith("student."):
+        #             new_k = k[len("student."):]  # 去除前綴
+        #             student_only_sd[new_k] = v
+        #     # print(student_only_sd.keys())
+        #     try:
+        #         self.student.load_state_dict(student_only_sd) 
+        #     except BaseException as e: 
+        #         print(str(e))
+        #         print("Loading weights with strict=False")
+        #         self.student.load_state_dict(student_only_sd, strict=False) 
         
         # 部分複製權重
-        # partial_init_student_from_teacher(self.teacher, self.student)
+        partial_init_student_from_teacher(self.teacher, self.student)
         
         # freeze student encoder gradients for ditil
-        # if cfg.freeze_encoder != 0:
-        #     for param in self.student.encoder.parameters():
-        #         param.requires_grad = False
+        if cfg.freeze_encoder != 0:
+            for param in self.student.encoder.parameters():
+                param.requires_grad = False
 
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language=cfg.lang, task='transcribe')
         self.ce_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
@@ -644,7 +645,8 @@ if __name__ == "__main__":
             config=cfg,
             # name="distil-monolingual",
             # name="distil-monolingual_deu",
-            name="distil-monolingual_fra",
+            # name="distil-monolingual_fra",
+            name="distil-monolingual_ita",
             # name="distil-bilingual",
             # name="distil-trilingual",
             # name="distil-quadrilingual",
@@ -658,88 +660,89 @@ if __name__ == "__main__":
                                                                         cfg.filename)
         
     model = DistillWhisperModule(cfg, cfg.model_name, cfg.lang, pseudo_dict)
-    model.to("cuda")  # 確保所有權重都在 GPU
-    student_model = model.student
-    def count_parameters(student_model):
-        return sum(p.numel() for p in student_model.parameters() if p.requires_grad)
 
-    num_params = count_parameters(student_model)
-    print(f"Total Trainable Parameters: {num_params / 1e6:.2f}M")
+    # model.to("cuda")  # 確保所有權重都在 GPU
+    # student_model = model.student
+    # def count_parameters(student_model):
+    #     return sum(p.numel() for p in student_model.parameters() if p.requires_grad)
 
-    # 建立測試輸入
-    dummy_input = torch.randn(1, 80, 3000).to("cuda")  # (Batch, Mel, Time Frames)
-    dummy_tokens = torch.randint(0, 51865, (1, 30)).to("cuda")  # (Batch, Token Length)
+    # num_params = count_parameters(student_model)
+    # print(f"Total Trainable Parameters: {num_params / 1e6:.2f}M")
 
-    flop_analyzer = FlopCountAnalysis(student_model, (dummy_input, dummy_tokens))
-    print(f"Total FLOPs: {flop_analyzer.total() / 1e9:.2f} GFLOPs")
+    # # 建立測試輸入
+    # dummy_input = torch.randn(1, 80, 3000).to("cuda")  # (Batch, Mel, Time Frames)
+    # dummy_tokens = torch.randint(0, 51865, (1, 30)).to("cuda")  # (Batch, Token Length)
 
-    def measure_inference_time(student_model, dummy_input, dummy_tokens, num_trials=10):
-        student_model.eval()
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        student_model.to(device)
-        
-        # Warm-up
-        with torch.no_grad():
-            for _ in range(5):
-                _ = student_model(dummy_input, dummy_tokens)
-                if device == "cuda":
-                    torch.cuda.synchronize()
-        
-        # 開始計時 (使用 torch.cuda.Event 進行更精確計時)
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+    # flop_analyzer = FlopCountAnalysis(student_model, (dummy_input, dummy_tokens))
+    # print(f"Total FLOPs: {flop_analyzer.total() / 1e9:.2f} GFLOPs")
 
-        start_event.record()
-        with torch.no_grad():
-            for _ in range(num_trials):
-                _ = student_model(dummy_input, dummy_tokens)
-                if device == "cuda":
-                    torch.cuda.synchronize()
-        end_event.record()
+    # def measure_inference_time(student_model, dummy_input, dummy_tokens, num_trials=10):
+    #     student_model.eval()
+    #     device = "cuda" if torch.cuda.is_available() else "cpu"
+    #     student_model.to(device)
         
-        # 等待所有事件完成
-        if device == "cuda":
-            torch.cuda.synchronize()
+    #     # Warm-up
+    #     with torch.no_grad():
+    #         for _ in range(5):
+    #             _ = student_model(dummy_input, dummy_tokens)
+    #             if device == "cuda":
+    #                 torch.cuda.synchronize()
         
-        total_time_ms = start_event.elapsed_time(end_event)
-        avg_time = total_time_ms / num_trials
-        print(f"Average Inference Time per sample: {avg_time:.2f} ms")
+    #     # 開始計時 (使用 torch.cuda.Event 進行更精確計時)
+    #     start_event = torch.cuda.Event(enable_timing=True)
+    #     end_event = torch.cuda.Event(enable_timing=True)
+
+    #     start_event.record()
+    #     with torch.no_grad():
+    #         for _ in range(num_trials):
+    #             _ = student_model(dummy_input, dummy_tokens)
+    #             if device == "cuda":
+    #                 torch.cuda.synchronize()
+    #     end_event.record()
         
-    # 假設 dummy_input 和 dummy_tokens 已正確準備
-    measure_inference_time(student_model, dummy_input, dummy_tokens)
+    #     # 等待所有事件完成
+    #     if device == "cuda":
+    #         torch.cuda.synchronize()
+        
+    #     total_time_ms = start_event.elapsed_time(end_event)
+    #     avg_time = total_time_ms / num_trials
+    #     print(f"Average Inference Time per sample: {avg_time:.2f} ms")
+        
+    # # 假設 dummy_input 和 dummy_tokens 已正確準備
+    # measure_inference_time(student_model, dummy_input, dummy_tokens)
     
-    # # Create a WandB logger instance
-    # wandb_logger = WandbLogger()
+    # Create a WandB logger instance
+    wandb_logger = WandbLogger()
     
-    # strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
-    # trainer = Trainer(
-    #     precision=cfg.precision,
-    #     strategy=strategy,
-    #     accelerator="gpu",
-    #     max_steps=cfg.num_train_steps,
-    #     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-    #     logger=wandb_logger,
-    #     callbacks=callback_list,
-    #     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
-    #     devices=cfg.num_devices,
-    #     val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-    #     check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
-    #     reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-    #     use_distributed_sampler=False, # implemented custom distributed trainer
-    #     sync_batchnorm=True,
-    # )
+    strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
+    trainer = Trainer(
+        precision=cfg.precision,
+        strategy=strategy,
+        accelerator="gpu",
+        max_steps=cfg.num_train_steps,
+        accumulate_grad_batches=cfg.gradient_accumulation_steps,
+        logger=wandb_logger,
+        callbacks=callback_list,
+        num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
+        devices=cfg.num_devices,
+        val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
+        check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
+        reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
+        use_distributed_sampler=False, # implemented custom distributed trainer
+        sync_batchnorm=True,
+    )
 
-    # # TODO: save config file tp the checkpoint dir, also for pre-trained model
-    # print(cfg)
-    # resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
-    # if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
-    #     trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-    #                                             model.test_dataloader_clean(), model.test_dataloader_other()])
-    # else:
-    #     trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-    #                                             model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-    #     trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-    #                                         model.test_dataloader_clean(), model.test_dataloader_other()])
+    # TODO: save config file tp the checkpoint dir, also for pre-trained model
+    print(cfg)
+    resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
+    if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
+        trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                                model.test_dataloader_clean(), model.test_dataloader_other()])
+    else:
+        trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                                model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
+        trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                            model.test_dataloader_clean(), model.test_dataloader_other()])
 
-    # # End the WandB run
-    # wandb.finish()
+    # End the WandB run
+    wandb.finish()

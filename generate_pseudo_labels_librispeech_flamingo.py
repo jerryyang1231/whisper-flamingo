@@ -113,7 +113,7 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
         for base_dir in self.translation_base_dirs:
             t = self.get_translation_text(file_id, base_dir)
             t = self.text_normalizer(t)  # 正規化
-            all_translations.append(t)       
+            all_translations.append(t)
 
         return {
             "ids": file_id,
@@ -182,7 +182,7 @@ def generate_pseudo_labels(cfg, split):
                                 dropout_rate = cfg.dropout_rate,
                                 add_gated_x_attn = cfg.add_gated_x_attn,
                                 num_langs = cfg.num_langs,
-                            )
+                                )
 
     # 如果有 teacher_ckpt
     if cfg.teacher_ckpt != '':

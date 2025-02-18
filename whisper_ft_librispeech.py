@@ -62,7 +62,7 @@ class LibriSpeechDataset(Dataset):
         item = self.dataset[id]
                
         # 獲取音頻數據和文本
-        wav_data = item['audio']['array']        
+        wav_data = item['audio']['array']
         text = item['text']
         wav_lens = len(wav_data)
         
@@ -93,7 +93,7 @@ class LibriSpeechDataset(Dataset):
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
-                        self.tokenizer.encode(" " + text)       
+                        self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
 
         return {
@@ -140,7 +140,7 @@ class WhisperModelModule(LightningModule):
         return decoder_out
     
     def training_step(self, batch, batch_id):
-        
+
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
@@ -150,11 +150,11 @@ class WhisperModelModule(LightningModule):
         out = self.model.decoder(dec_input_ids, audio_features)
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
-        
+
         return loss
     
     def validation_step(self, batch, batch_id, dataloader_idx=None):
-               
+
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
@@ -362,83 +362,34 @@ tflogger, callback_list = setup_logging_and_checkpoint_librispeech(cfg.log_outpu
                                                                     cfg.filename)
 
 model = WhisperModelModule(cfg, cfg.model_name, cfg.lang)
-model.to("cuda")  # 確保所有權重都在 GPU
 
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+# Create a WandB logger instance
+wandb_logger = WandbLogger()
 
-num_params = count_parameters(model)
-print(f"Total Trainable Parameters: {num_params / 1e6:.2f}M")
+trainer = Trainer(
+    precision=cfg.precision,
+    accelerator="gpu",
+    max_steps=cfg.num_train_steps,
+    accumulate_grad_batches=cfg.gradient_accumulation_steps,
+    logger=wandb_logger,
+    callbacks=callback_list,
+    num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
+    devices=cfg.num_devices,
+    val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
+    check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
+    reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
+    use_distributed_sampler=False, # implemented custom distributed trainer
+)
 
-# 建立測試輸入
-dummy_input = torch.randn(1, 80, 3000).to("cuda")  # (Batch, Mel, Time Frames)
-dummy_tokens = torch.randint(0, 51865, (1, 30)).to("cuda")  # (Batch, Token Length)
+print(cfg)
+resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
+if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
+    trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other()])
+else:
+    trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+                                                model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
+    # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
+    #                                     model.test_dataloader_clean(), model.test_dataloader_other()])
 
-flop_analyzer = FlopCountAnalysis(model, (dummy_input, dummy_tokens))
-print(f"Total FLOPs: {flop_analyzer.total() / 1e9:.2f} GFLOPs")
-
-def measure_inference_time(model, dummy_input, dummy_tokens, num_trials=10):
-    model.eval()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
-    
-    # Warm-up
-    with torch.no_grad():
-        for _ in range(5):
-            _ = model(dummy_input, dummy_tokens)
-            if device == "cuda":
-                torch.cuda.synchronize()
-    
-    # 開始計時 (使用 torch.cuda.Event 進行更精確計時)
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    start_event.record()
-    with torch.no_grad():
-        for _ in range(num_trials):
-            _ = model(dummy_input, dummy_tokens)
-            if device == "cuda":
-                torch.cuda.synchronize()
-    end_event.record()
-    
-    # 等待所有事件完成
-    if device == "cuda":
-        torch.cuda.synchronize()
-    
-    total_time_ms = start_event.elapsed_time(end_event)
-    avg_time = total_time_ms / num_trials
-    print(f"Average Inference Time per sample: {avg_time:.2f} ms")
-    
-# 假設 dummy_input 和 dummy_tokens 已正確準備
-measure_inference_time(model, dummy_input, dummy_tokens)
-
-# # Create a WandB logger instance
-# wandb_logger = WandbLogger()
-
-# trainer = Trainer(
-#     precision=cfg.precision,
-#     accelerator="gpu",
-#     max_steps=cfg.num_train_steps,
-#     accumulate_grad_batches=cfg.gradient_accumulation_steps,
-#     logger=wandb_logger,
-#     callbacks=callback_list,
-#     num_sanity_val_steps=0, # default is 2 batches, 0 to turn off
-#     devices=cfg.num_devices,
-#     val_check_interval=int(cfg.validate_every_n_batches * cfg.gradient_accumulation_steps), # validate after this number batches
-#     check_val_every_n_epoch=None, # If None, validation will be done solely based on the number of training batches
-#     reload_dataloaders_every_n_epochs=1, # shuffle the dataloader after an epoch
-#     use_distributed_sampler=False, # implemented custom distributed trainer
-# )
-
-# print(cfg)
-# resume_ckpt = f"{cfg.check_output_dir}/{cfg.train_id}/last.ckpt"
-# if os.path.exists(resume_ckpt) and cfg.resume_training: # resume training, don't validate
-#     trainer.fit(model, ckpt_path='last', val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other()])
-# else:
-#     trainer.validate(model=model, dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-#                                                 model.test_dataloader_clean(), model.test_dataloader_other()]) # validate before training
-#     # trainer.fit(model, val_dataloaders=[model.val_dataloader_clean(), model.val_dataloader_other(),
-#     #                                     model.test_dataloader_clean(), model.test_dataloader_other()])
-
-# # End the WandB run
-# wandb.finish()
+# End the WandB run
+wandb.finish()

@@ -23,10 +23,8 @@ from utils_batch_samplers import SortedBatchSampler
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from whisper.normalizers.basic import BasicTextNormalizer
-from datasets.download.download_config import DownloadConfig
 # os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
-# os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "86400"
 
 # my command
 # python -u whisper_ft_kloka_crawled.py config/audio/kloka_crawled.yaml
@@ -35,7 +33,6 @@ SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 HF_TOKEN = "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"
-# download_config = DownloadConfig(timeout=86400)
 
 class KlokaCrawledDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
@@ -57,7 +54,6 @@ class KlokaCrawledDataset(Dataset):
                 name=config_name,
                 split='train',
                 use_auth_token=HF_TOKEN,
-                # download_config=download_config
             )
 
             # 取得原始數據筆數
@@ -79,7 +75,6 @@ class KlokaCrawledDataset(Dataset):
                     name=config_name,
                     split='train',
                     use_auth_token=HF_TOKEN,
-                    # download_config=download_config
                 )
 
                 # 取得原始數據筆數
@@ -110,7 +105,7 @@ class KlokaCrawledDataset(Dataset):
 
         wav_data = item['audio']['array']
         wav_lens = len(wav_data)
-        
+
         text = item['text']
         language = item['language']
         dialect = item['dialect']
@@ -129,7 +124,7 @@ class KlokaCrawledDataset(Dataset):
 
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
-        
+
         # 建立方言 prompt
         prompt_ids = [self.tokenizer.sot_prev] + \
                     self.tokenizer.encode(" " + prompt)
@@ -196,7 +191,6 @@ class WhisperModelModule(LightningModule):
         audio_features = self.model.encoder(input_ids)
 
         out = self.model.decoder(dec_input_ids, audio_features)
-
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
         
@@ -397,8 +391,10 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
                 config=cfg,
-                name="whisper finetune kloka crawled (sota)"
-    )
+                # name="whisper finetune kloka crawled"
+                # name="whisper finetune kloka crawled amis"
+                name="whisper finetune kloka crawled pinuyumayan"
+            )
 
     callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 
                                                                 cfg.check_output_dir, 
@@ -432,10 +428,6 @@ if __name__ == "__main__":
     )
 
     print(cfg)
-    # eval_dataloaders = model.val_dataloaders()
-    # for config_name, dl in eval_dataloaders.items():
-    #     print(f"Evaluating config: {config_name}")
-    #     trainer.validate(model=model, dataloaders=dl)
     eval_dataloaders = list(model.val_dataloaders().values())
     trainer.validate(model=model, dataloaders=eval_dataloaders)
     trainer.fit(model, val_dataloaders=eval_dataloaders)

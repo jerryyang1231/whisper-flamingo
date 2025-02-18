@@ -13,8 +13,6 @@ from .decoding import decode as decode_function
 from .decoding import detect_language as detect_language_function
 from .transcribe import transcribe as transcribe_function
 
-from transformers import BertModel, BertTokenizer
-
 @dataclass
 class ModelDimensions:
     n_mels: int

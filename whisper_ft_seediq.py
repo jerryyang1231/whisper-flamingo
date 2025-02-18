@@ -9,6 +9,7 @@ from datasets import load_dataset, concatenate_datasets
 from torch.utils.data import Dataset
 import whisper
 from pytorch_lightning import LightningModule, Trainer, seed_everything
+from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from spec_augment import spec_augment
 from utils import (

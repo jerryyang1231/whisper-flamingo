@@ -32,7 +32,7 @@ os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
-# python -u translation_prompt.py config/audio-text/translation_prompt.yaml
+# python -u whisper_prompt_taigi.py config/audio-text/whisper_prompt_taigi.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407

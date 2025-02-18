@@ -5,15 +5,15 @@ import types
 import numpy as np
 import torch
 from torch import nn
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from torch.utils.data import Dataset
 import whisper
 from pytorch_lightning import LightningModule, Trainer, seed_everything
+from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
-from spec_augment import spec_augment
 from utils import (
     add_noise,
-    WhisperDataCollatorWhithPadding_kloka_crawled,
+    kloka_crawled_collator,
     whisper_optimizer,
     setup_logging_and_checkpoint_kloka_crawled,
     wer_cer,
@@ -23,52 +23,77 @@ from utils_batch_samplers import SortedBatchSampler
 import wandb
 from pytorch_lightning.loggers import WandbLogger
 from whisper.normalizers.basic import BasicTextNormalizer
-os.environ["WANDB_MODE"] = "disabled"
+# os.environ["WANDB_MODE"] = "disabled"
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+
+# my command
+# python -u whisper_ft_kloka_without_prompt.py config/audio/truku.yaml
+# python -u whisper_ft_kloka_without_prompt.py config/audio/seediq.yaml
+# python -u whisper_ft_kloka_without_prompt.py config/audio/amis.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
 seed_everything(SEED, workers=True)
 HF_TOKEN = "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"
 
-# my command
-# python -u whisper_ft_truku.py config/audio/truku.yaml
-
-class KlokaCrawledTrukuDataset(Dataset):
+class KlokaCrawledDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
-                 spec_augment, noise_prob=0, noise_fn=None) -> None:
+                config_names, noise_prob=0, noise_fn=None) -> None:
         super().__init__()
 
-        if split == 'train':
-            self.dataset = load_dataset("formospeech/kloka_crawled_asr_train",
-                                   name="太魯閣",
-                                   split="train",
-                                   use_auth_token=HF_TOKEN
-            )
-            print(f"train set size (original): {len(self.dataset)}")
-            
-            # 過濾 chinese 欄位為空的數據
-            self.dataset = self.dataset.filter(lambda example: example.get("chinese", "").strip() != "")
+        # 根據 split 選擇不同的 dataset
+        dataset_name = "formospeech/kloka_crawled_asr_train" if split == 'train' else "formospeech/kloka_crawled_asr_eval"
 
-            print(f"train set size (filtered): {len(self.dataset)}")
+        # 這裡若 config_names 為字串，會先分割，再依序下載
+        if isinstance(config_names, str):
+            config_names = config_names.split("+")
+
+        # 若只需要單一 config 就不做合併
+        if len(config_names) == 1:
+            config_name = config_names[0].strip()
+            ds = load_dataset(
+                dataset_name,
+                name=config_name,
+                split='train',
+                use_auth_token=HF_TOKEN,
+            )
+
+            # 取得原始數據筆數
+            original_count = len(ds)
+            ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
+
+            # 取得過濾後的數據筆數
+            filtered_count = len(ds)
+            self.dataset = ds
+            # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
+            print(f"{split} set for '{config_name}' size: {len(self.dataset)}")
         else:
-            self.dataset = load_dataset("formospeech/kloka_crawled_asr_eval",
-                                   name="太魯閣",
-                                   split="train",
-                                   use_auth_token=HF_TOKEN
-            )
-            print(f"eval set size (original): {len(self.dataset)}")
-            
-            # 過濾 chinese 欄位為空的數據
-            self.dataset = self.dataset.filter(lambda example: example.get("chinese", "").strip() != "")
+            # 訓練時使用多個 config 的合併
+            all_datasets = []
+            for config_name in config_names:
+                config_name = config_name.strip()
+                ds = load_dataset(
+                    dataset_name,
+                    name=config_name,
+                    split='train',
+                    use_auth_token=HF_TOKEN,
+                )
 
-            print(f"eval set size (filtered): {len(self.dataset)}")
+                # 取得原始數據筆數
+                original_count = len(ds)
+                ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
+
+                # 取得過濾後的數據筆數
+                filtered_count = len(ds)
+                # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
+                all_datasets.append(ds)
+            self.dataset = concatenate_datasets(all_datasets)
+            print(f"{split} set (merged) size: {len(self.dataset)}")
 
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
         self.model_name = model_name
         self.max_length = max_length
-        self.spec_augment = spec_augment
         self.noise_prob = noise_prob
         self.noise_fn = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else []
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
@@ -81,9 +106,13 @@ class KlokaCrawledTrukuDataset(Dataset):
         item = self.dataset[id]
 
         wav_data = item['audio']['array']
-        text = item['text']
         wav_lens = len(wav_data)
-        
+
+        text = item['text']
+        language = item['language']
+        dialect = item['dialect']
+        prompt = "_".join([language, dialect])
+
         # 使用 BasicTextNormalizer 正規化文本
         text = self.text_normalizer(text)
         
@@ -102,14 +131,15 @@ class KlokaCrawledTrukuDataset(Dataset):
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
-                        self.tokenizer.encode(" " + text)       
+                        self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
 
         return {
+            "wav_lens": wav_lens,
             "input_ids": mel,
-            "labels": labels,
+            "prompt": prompt,
             "dec_input_ids": dec_input_ids,
-            "wav_lens": wav_lens
+            "labels": labels,
         }
 
 class WhisperModelModule(LightningModule):
@@ -121,8 +151,9 @@ class WhisperModelModule(LightningModule):
         self.model = whisper.load_model(model_name,
                                         device='cpu', # avoid OOM on gpu 0 for distributed
                                         download_root='/share/nas169/jerryyang/whisper-flamingo/models',
-                                        dropout_rate=cfg.dropout_rate)
-        
+                                        dropout_rate=cfg.dropout_rate
+                                        )
+
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
             checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
             state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
@@ -162,12 +193,12 @@ class WhisperModelModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
+        prompt = batch["prompt"][0]
 
         audio_features = self.model.encoder(input_ids)
         out = self.model.decoder(dec_input_ids, audio_features)
-
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
-        
+
         labels[labels == -100] = self.tokenizer.eot
         tokens = torch.argmax(out, dim=2)
 
@@ -208,8 +239,8 @@ class WhisperModelModule(LightningModule):
             print("PRED: {}".format(hypo))
             print("REF:  {}".format(ref))
             if i == 1: break
-        
-        log_prefix = 'eval'
+
+        log_prefix = "eval"
         self.log("{}/loss".format(log_prefix), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/cer".format(log_prefix), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/wer".format(log_prefix), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
@@ -225,6 +256,7 @@ class WhisperModelModule(LightningModule):
         model = self.model
         optimizer, scheduler = whisper_optimizer(model, self.cfg, self.t_total)
         self.optimizer, self.scheduler = optimizer, scheduler
+
         return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
 
     def setup(self, stage=None):
@@ -232,35 +264,37 @@ class WhisperModelModule(LightningModule):
             self.t_total = self.cfg.num_train_steps
 
     def train_dataloader(self):
-        dataset = KlokaCrawledTrukuDataset('train',
-                                      self.tokenizer, 
-                                      SAMPLE_RATE,
-                                      self.model_name,
-                                      max_length=self.cfg.audio_max_length,
-                                      spec_augment=self.cfg.spec_augment,
-                                      noise_prob=self.cfg.noise_prob)   
+        dataset = KlokaCrawledDataset('train',
+                                    self.tokenizer, 
+                                    SAMPLE_RATE,
+                                    self.model_name,
+                                    max_length=self.cfg.audio_max_length,
+                                    config_names=self.cfg.config_names,
+                                    noise_prob=self.cfg.noise_prob
+                                    )   
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
                     sort_in_batch='descending',
                     sort_batch='descending',
-                    drop_last=True)
+                    drop_last=True
+                    )
         if cfg.num_devices > 1:
             print("Using distributed sampler")
             batch_sampler = DistributedSamplerWrapper(batch_sampler)
         return torch.utils.data.DataLoader(dataset,
                         batch_sampler=batch_sampler,
                         num_workers=self.cfg.num_worker,
-                        collate_fn=WhisperDataCollatorWhithPadding_kloka_crawled()
+                        collate_fn=kloka_crawled_collator()
                         )
 
     def val_dataloader(self):
-        dataset = KlokaCrawledTrukuDataset('eval',
+        dataset = KlokaCrawledDataset('eval',
                                       self.tokenizer, 
                                       SAMPLE_RATE,
                                       self.model_name,
                                       max_length=self.cfg.audio_max_length,
-                                      spec_augment=False,
+                                      config_names=self.cfg.config_names,
                                       noise_prob=0
                                     )
         batch_sampler = SortedBatchSampler(
@@ -272,7 +306,7 @@ class WhisperModelModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                         batch_sampler=batch_sampler,
                         num_workers=self.cfg.num_worker,
-                        collate_fn=WhisperDataCollatorWhithPadding_kloka_crawled()
+                        collate_fn=kloka_crawled_collator()
                         )
 
 cfg_yaml = sys.argv[1]
@@ -285,9 +319,11 @@ print("audio max length: {}".format(cfg.audio_max_length))
 
 # Initialize WandB
 wandb.init(project="whisper-flamingo",
-           config=cfg,
-           name="whisper finetune truku",
-)
+            config=cfg,
+            # name="whisper finetune truku",
+            # name="whisper finetune seediq",
+            name="whisper finetune amis_siwkulan"
+            )
 
 callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 
                                                             cfg.check_output_dir, 
@@ -302,8 +338,10 @@ model = WhisperModelModule(cfg, cfg.model_name, cfg.lang)
 # Create a WandB logger instance
 wandb_logger = WandbLogger()
 
+strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
 trainer = Trainer(
     precision=cfg.precision,
+    strategy=strategy,
     accelerator="gpu",
     max_steps=cfg.num_train_steps,
     accumulate_grad_batches=cfg.gradient_accumulation_steps,
@@ -318,7 +356,7 @@ trainer = Trainer(
 )
 
 print(cfg)
-# trainer.validate(model=model, dataloaders=model.val_dataloader()) # validate before training
+trainer.validate(model=model, dataloaders=model.val_dataloader()) # validate before training
 trainer.fit(model, val_dataloaders=model.val_dataloader())
 
 # End the WandB run

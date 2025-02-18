@@ -6,7 +6,6 @@ weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
 validate_every_n_batches: 4000
-# validate_every_n_batches: 2000
 num_devices: 1
 precision: 16-mixed
 
@@ -15,9 +14,6 @@ learning_rate: 1.25e-5 # small
 batch_size: 4
 num_train_steps: 480000
 warmup_steps: 48000
-# batch_size: 8
-# num_train_steps: 240000
-# warmup_steps: 24000
 gradient_accumulation_steps: 1
 
 monitor: 'dev-other/wer_at'
@@ -30,18 +26,23 @@ dropout_rate: 0
 lang: en
 resume_training: False
 
-pt_ckpt: 'whisper_en-x_small/step-27000-cer=0.0297-wer=0.0575.ckpt'
-# train_id: trilingual_top3
-train_id: trilingual_top3 (espeon)
+# pt_ckpt: 'whisper_en-x_small/step-27000-cer=0.0297-wer=0.0575.ckpt'
+# pt_ckpt: 'monolingual/step-216000-wer_at=0.0510.ckpt'
+pt_ckpt: 'monolingual_fra/step-284000-wer_at=0.0467.ckpt'
+train_id: quadrilingual
 
 # flamingo
 add_gated_x_attn: 1 # 0 for False, 1 for True
-num_langs: 3
+num_langs: 1
 
-translation_base_dirs:
-  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/German"
-  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Italian"
-  - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/French"
+translation_configs: 
+  # - "cmn_hans_cn"
+  - "fr_fr"
+# translation_base_dirs:
+  # - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Chinese"
+  # - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/German"
+  # - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/French"
+  # - "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Italian"
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
