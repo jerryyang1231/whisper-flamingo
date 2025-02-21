@@ -12,9 +12,10 @@ from pytorch_lightning import LightningModule
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
+from spec_augment import spec_augment
 from utils import (
     add_noise,
-    kloka_crawled_collator,
+    kloka_crawled_collator_with_trans,
     whisper_optimizer,
     whisper_flamingo_optimizer,
     setup_logging_and_checkpoint_kloka_crawled,
@@ -31,9 +32,9 @@ import pandas as pd
 os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
 
 # my command
-# python -u whisper_flamingo_kloka_without_prompt.py config/audio-text/flamingo_truku.yaml
-# python -u whisper_flamingo_kloka_without_prompt.py config/audio-text/flamingo_seediq.yaml
-# python -u whisper_flamingo_kloka_without_prompt.py config/audio-text/flamingo_amis.yaml
+# python -u trans-asr_kloka.py config/audio-text/trans-asr_truku.yaml
+# python -u trans-asr_kloka.py config/audio-text/flamingo_seediq.yaml
+# python -u trans-asr_kloka.py config/audio-text/flamingo_amis.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -42,7 +43,7 @@ HF_TOKEN = "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"
 
 class KlokaCrawledDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, lang, max_length, 
-                config_names, noise_prob=0, noise_fn=None, translation_csv=None) -> None:
+                spec_augment, config_names, noise_prob=0, noise_fn=None, translation_csv=None) -> None:
         super().__init__()
 
         # 根據 split 選擇不同的 dataset
@@ -97,6 +98,7 @@ class KlokaCrawledDataset(Dataset):
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
         self.model_name = model_name
+        self.spec_augment = spec_augment
         self.lang = lang
         self.max_length = max_length
         self.noise_prob = noise_prob
@@ -126,24 +128,22 @@ class KlokaCrawledDataset(Dataset):
         wav_data = item['audio']['array']
         wav_lens = len(wav_data)
         text = item['text']
+        chinese = item['chinese']
 
         # 這裡原本的 chinese 欄位為中文翻譯，但我們希望使用印尼文翻譯
         # 如果 translation_dict 中有對應的翻譯，則使用；否則 fallback 為原有的 chinese 欄位
         if item_id in self.translation_dict:
             translation_text = self.translation_dict[item_id]
         else:
-            translation_text = item.get("chinese", "")
+            translation_text = ""
 
         # 如果翻譯不是字串（例如是 NaN 或 float），則轉換為字串或設定為空字串
         if not isinstance(translation_text, str):
             translation_text = "" if np.isnan(translation_text) else str(translation_text)    
-        
-        language = item['language']
-        dialect = item['dialect']
-        prompt = "_".join([language, dialect])
 
         # 使用 BasicTextNormalizer 正規化文本
         text = self.text_normalizer(text)
+        chinese = self.text_normalizer(chinese)
         translation_text = self.text_normalizer(translation_text)
 
         if np.random.rand() > self.noise_prob: # 不加噪音
@@ -151,24 +151,35 @@ class KlokaCrawledDataset(Dataset):
         else: # 加噪音
             audio = add_noise(wav_data, self.noise_fn, noise_snr=0).flatten().astype(np.float32)
 
+        audio_frames = len(audio.flatten()) // 160
         if self.max_length is not None:
             audio = whisper.pad_or_trim(audio.flatten(), length=self.max_length)
 
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
 
+        if self.spec_augment:
+            if self.spec_augment == "ls-double":
+                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
+            elif self.spec_augment == "ls-basic":
+                mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames, n_freq_mask=1, n_time_mask=1)).T
+            else:
+                raise NotImplementedError 
         dec_input_ids = [self.tokenizer.sot, 
                         self.tokenizer.special_tokens["<|{}|>".format(lang)],
                         self.tokenizer.transcribe, 
                         self.tokenizer.no_timestamps] + \
                         self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
+        
+        all_translations = []
+        all_translations.append(chinese)
+        all_translations.append(translation_text)
 
         return {
             "wav_lens": wav_lens,
-            "translations": translation_text,
+            "all_translations": all_translations,
             "input_ids": mel,
-            "prompt": prompt,
             "dec_input_ids": dec_input_ids,
             "labels": labels,
         }
@@ -200,7 +211,7 @@ class WhisperTextModule(LightningModule):
                 print("Loading weights with strict=False")
                 self.model.load_state_dict(state_dict_updated, strict=False)
 
-        if cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
+        if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
             for p in self.model.encoder.parameters():
                 p.requires_grad = False
 
@@ -210,13 +221,9 @@ class WhisperTextModule(LightningModule):
         self.special_token_set = set(self.tokenizer.special_tokens.values())
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
         
-        # # 初始化 BERT 分詞器和模型
-        # self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-        # self.bert_model = BertModel.from_pretrained('bert-base-chinese').to(self.device)
-
-        # 修改此處：使用印尼文預訓練的 BERT 模型，取代原本的中文 BERT
-        self.bert_tokenizer = BertTokenizer.from_pretrained('indobenchmark/indobert-base-p1')
-        self.bert_model = BertModel.from_pretrained('indobenchmark/indobert-base-p1').to(self.device)
+        # 初始化 BERT 分詞器和模型
+        self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
+        self.bert_model = BertModel.from_pretrained("bert-base-multilingual-cased")
 
     def forward(self, x):
         return self.model(x)
@@ -225,26 +232,43 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translations = batch["translations"]
+        all_translations = batch["all_translations"]
+        # all_translations: list of length = batch_size
+        # each element is a list of strings for that sample's translations
 
-        # 使用 BERT 分詞器對文本進行編碼
-        bert_inputs = self.bert_tokenizer(
-            translations,
-            return_tensors='pt',
-            padding=True,
-            truncation=True,
-            max_length=448
-        ).to(self.device)
-        
-        # 通過 BERT 模型獲取輸出
-        bert_outputs = self.bert_model(**bert_inputs)
-        xt = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        # 假設每個 sample 有相同數量的翻譯 texts
+        num_samples = len(all_translations)           # batch_size
+        num_translations = len(all_translations[0])   # 每個 sample 的翻譯數量
 
-        audio_features = self.model.encoder(input_ids)
+        all_xt = []
+        # 迴圈跑 num_translations 次，每次收集 "整個 batch" 對應的某個翻譯索引
+        for t_idx in range(num_translations):
+            # 收集「batch 中所有樣本」在第 t_idx 個翻譯
+            batch_texts_for_this_translation = []
+            for s_idx in range(num_samples):
+                # 取第 s_idx 個 sample 的第 t_idx 筆翻譯
+                text_t = all_translations[s_idx][t_idx]
+                batch_texts_for_this_translation.append(text_t)
 
-        # 將 BERT 輸出作為 xt 傳遞給解碼器
-        out = self.model.decoder(dec_input_ids, audio_features, xt_list=[xt])
+            # 一次把這批文字 (大小 = batch_size) 丟給 BERT
+            tokenized = self.bert_tokenizer(
+                batch_texts_for_this_translation,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=448
+            ).to(self.device)
 
+            outputs = self.bert_model(**tokenized)
+            outputs_last_hidden_state = outputs.last_hidden_state  # shape = [batch_size, seq_len, hidden_size]
+
+            all_xt.append(outputs_last_hidden_state)
+
+        # 這樣 all_xt 就是一個 list，長度 = num_translations
+        # all_xt[t] shape = [batch_size, seq_len, hidden_size]
+
+        features = self.model.encoder(input_ids)
+        out = self.model.decoder(dec_input_ids, features, xt_list=all_xt)
         loss = self.loss_fn(out.view(-1, out.size(-1)), labels.view(-1))
         self.log("train/loss", loss, on_step=True, prog_bar=True, logger=True, sync_dist=True)
         
@@ -254,26 +278,43 @@ class WhisperTextModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        prompt = batch["prompt"][0]
-        translations = batch["translations"]
+        all_translations = batch["all_translations"]
+        # all_translations: list of length = batch_size
+        # each element is a list of strings for that sample's translations
 
-        # 使用 BERT 分詞器對文本進行編碼
-        bert_inputs = self.bert_tokenizer(
-            translations,
-            return_tensors='pt',
-            padding=True,
-            truncation=True,
-            max_length=448
-        ).to(self.device)
+        # 假設每個 sample 有相同數量的翻譯 texts
+        num_samples = len(all_translations)           # batch_size
+        num_translations = len(all_translations[0])   # 每個 sample 的翻譯數量
 
-        # 通過 BERT 模型獲取輸出
-        bert_outputs = self.bert_model(**bert_inputs)
-        xt = bert_outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
+        all_xt = []
+        # 迴圈跑 num_translations 次，每次收集 "整個 batch" 對應的某個翻譯索引
+        for t_idx in range(num_translations):
+            # 收集「batch 中所有樣本」在第 t_idx 個翻譯
+            batch_texts_for_this_translation = []
+            for s_idx in range(num_samples):
+                # 取第 s_idx 個 sample 的第 t_idx 筆翻譯
+                text_t = all_translations[s_idx][t_idx]
+                batch_texts_for_this_translation.append(text_t)
 
-        audio_features = self.model.encoder(input_ids)
+            # 一次把這批文字 (大小 = batch_size) 丟給 BERT
+            tokenized = self.bert_tokenizer(
+                batch_texts_for_this_translation,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=448
+            ).to(self.device)
 
-        # 將 BERT 輸出作為 xt 傳遞給解碼器
-        out_at = self.model.decoder(dec_input_ids, audio_features, xt_list=[xt])
+            outputs = self.bert_model(**tokenized)
+            outputs_last_hidden_state = outputs.last_hidden_state  # shape = [batch_size, seq_len, hidden_size]
+            
+            all_xt.append(outputs_last_hidden_state)
+        
+        # 這樣 all_xt 就是一個 list，長度 = num_translations
+        # all_xt[t] shape = [batch_size, seq_len, hidden_size]
+
+        features_a = self.model.encoder(input_ids)
+        out_at = self.model.decoder(dec_input_ids, features_a, xt_list=all_xt)
 
         labels[labels == -100] = self.tokenizer.eot
 
@@ -354,6 +395,7 @@ class WhisperTextModule(LightningModule):
                                     self.model_name,
                                     self.cfg.lang,
                                     max_length=self.cfg.audio_max_length,
+                                    spec_augment=self.cfg.spec_augment,
                                     config_names=self.cfg.config_names,
                                     noise_prob=self.cfg.noise_prob,
                                     translation_csv=self.cfg.translation_csv_train
@@ -371,7 +413,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                         batch_sampler=batch_sampler,
                         num_workers=self.cfg.num_worker,
-                        collate_fn=kloka_crawled_collator()
+                        collate_fn=kloka_crawled_collator_with_trans()
                         )
 
     def val_dataloader(self):
@@ -381,6 +423,7 @@ class WhisperTextModule(LightningModule):
                                     self.model_name,
                                     self.cfg.lang,
                                     max_length=self.cfg.audio_max_length,
+                                    spec_augment=False,
                                     config_names=self.cfg.config_names,
                                     noise_prob=0,
                                     translation_csv=self.cfg.translation_csv_eval
@@ -395,7 +438,7 @@ class WhisperTextModule(LightningModule):
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=kloka_crawled_collator()
+                          collate_fn=kloka_crawled_collator_with_trans()
                           )
 
 if __name__ == "__main__":
@@ -410,9 +453,9 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            # name="Trans-ASR_truku-ind (tune parmas)",
-            name="Trans-ASR_seediq_Tgdaya-ind (tune parmas)",
-            # name="Trans-ASR_amis_siwkulan-ind (tune parmas)"
+            name="trans-asr_truku_bilingual_spec_augment",
+            # name="Trans-ASR_seediq_Tgdaya bilingual",
+            # name="Trans-ASR_amis_siwkulan bilingual"
     )
 
     callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 

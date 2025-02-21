@@ -24,51 +24,75 @@ from utils_batch_samplers import SortedBatchSampler
 HF_TOKEN = "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"
 
 class KlokaCrawledDataset(Dataset):
-    def __init__(self, cfg, split,  
+    def __init__(self, cfg, split, config_names,
                 ) -> None:
         super().__init__()
 
         # 根據 split 選擇不同的 dataset
         dataset_name = "formospeech/kloka_crawled_asr_train" if split == 'train' else "formospeech/kloka_crawled_asr_eval"
-
-        # 將 config_names 轉為列表
-        config_names = cfg.config_names
+        translation_csv = cfg.translation_csv_train if split =='train' else cfg.translation_csv_eval
+        # 這裡若 config_names 為字串，會先分割，再依序下載
         if isinstance(config_names, str):
             config_names = config_names.split("+")
 
-        all_datasets = []
-        for config_name in config_names:
-            config_name = config_name.strip()
+        # 若只需要單一 config 就不做合併
+        if len(config_names) == 1:
+            config_name = config_names[0].strip()
             ds = load_dataset(
                 dataset_name,
                 name=config_name,
                 split='train',
                 use_auth_token=HF_TOKEN
             )
-            
+
             # 取得原始數據筆數
             original_count = len(ds)
-            
-            # 過濾掉 chinese 欄位為空的數據
-            ds_filtered = ds.filter(lambda example: example.get("chinese", "").strip() != "")
-            
+            ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
+
             # 取得過濾後的數據筆數
-            filtered_count = len(ds_filtered)
-            
-            print(f"Config '{config_name}': 原始筆數 = {original_count}, 過濾後筆數 = {filtered_count}")
-            
-            all_datasets.append(ds_filtered)
+            filtered_count = len(ds)
+            self.dataset = ds
+            # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
+            print(f"{split} set for '{config_name}' size: {len(self.dataset)}")
+        else:
+            # 訓練時使用多個 config 的合併
+            all_datasets = []
+            for config_name in config_names:
+                config_name = config_name.strip()
+                ds = load_dataset(
+                    dataset_name,
+                    name=config_name,
+                    split='train',
+                    use_auth_token=HF_TOKEN
+                )
 
-        # 使用 concatenate_datasets 合併所有 dataset
-        self.dataset = concatenate_datasets(all_datasets)
+                # 取得原始數據筆數
+                original_count = len(ds)
+                ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
 
-        print(f"{split} set size (filtered & merged): {len(self.dataset)}")
-        
+                # 取得過濾後的數據筆數
+                filtered_count = len(ds)
+                # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
+                all_datasets.append(ds)
+            self.dataset = concatenate_datasets(all_datasets)
+            print(f"{split} set (merged) size: {len(self.dataset)}")
+
         self.sample_rate = 16000
         self.model_name = cfg.model_name
         self.max_length = cfg.audio_max_length
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language=cfg.lang, task='transcribe')
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
+        
+        # 若提供了 translation_csv 則讀取印尼文翻譯對應表（CSV需包含欄位：id, chinese, translation）
+        self.translation_dict = {}
+        if translation_csv is not None:
+            try:
+                df = pd.read_csv(translation_csv)
+                # 以 id 為 key，translation 為 value
+                self.translation_dict = dict(zip(df["id"].astype(str), df["translation"]))
+                print(f"Loaded {len(self.translation_dict)} translation entries from {translation_csv}")
+            except Exception as e:
+                print(f"Failed to load translation CSV: {e}")
 
     def __len__(self):
         return len(self.dataset)
@@ -76,11 +100,28 @@ class KlokaCrawledDataset(Dataset):
     def __getitem__(self, id):
         lang = cfg.lang
         item = self.dataset[id]
+
+        # 取出原始資料中的 id
+        item_id = str(item.get("id", id))
         wav_data = item['audio']['array']
+        wav_lens = len(wav_data)
         text = item['text']
         chinese = item['chinese']
-        wav_lens = len(wav_data)
 
+        # 這裡原本的 chinese 欄位為中文翻譯，但我們希望使用印尼文翻譯
+        # 如果 translation_dict 中有對應的翻譯，則使用；否則 fallback 為原有的 chinese 欄位
+        if item_id in self.translation_dict:
+            translation_text = self.translation_dict[item_id]
+        else:
+            translation_text = ""
+
+        # 如果翻譯不是字串（例如是 NaN 或 float），則轉換為字串或設定為空字串
+        if not isinstance(translation_text, str):
+            translation_text = "" if np.isnan(translation_text) else str(translation_text)    
+        
+        # language = item['language']
+        # dialect = item['dialect']
+        # prompt = "_".join([language, dialect])
         text = self.text_normalizer(text)
         chinese = self.text_normalizer(chinese)
 
@@ -98,14 +139,18 @@ class KlokaCrawledDataset(Dataset):
                         self.tokenizer.no_timestamps] + \
                         self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
+        
+        all_translations = []
+        all_translations.append(chinese)
+        all_translations.append(translation_text)
 
         return {
             "ids": item["id"],
             "wav_lens": wav_lens,
+            "all_translations": all_translations,
             "input_ids": mel,
             "dec_input_ids": dec_input_ids,
             "labels": labels,
-            "translations": chinese,
         }
 
 ################################################################################
@@ -115,14 +160,14 @@ class KlokaCrawledDataset(Dataset):
 class Collator_kloka_crawled_pseudo:
     def __call__(self, features):
         # 收集各項
-        ids, input_ids, labels, dec_input_ids, translations, wav_lens = [], [], [], [], [], []
+        ids, input_ids, labels, dec_input_ids, all_translations, wav_lens = [], [], [], [], [], []
 
         for f in features:
             ids.append(f["ids"])
             input_ids.append(f["input_ids"])
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
-            translations.append(f["translations"])
+            all_translations.append(f["all_translations"])
             wav_lens.append(f["wav_lens"])
 
         # pad audio (input_ids) with 0
@@ -144,7 +189,7 @@ class Collator_kloka_crawled_pseudo:
             "input_ids": input_ids,
             "labels": labels,
             "dec_input_ids": dec_input_ids,
-            "translations": translations,
+            "all_translations": all_translations,
             "wav_lens": wav_lens,
         }
 
@@ -185,12 +230,12 @@ def generate_pseudo_labels(cfg, split):
     teacher.eval()
 
     # 載入 BERT (for xt_list)
-    bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-    bert_model = BertModel.from_pretrained('bert-base-chinese').to(device)
+    bert_tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
+    bert_model = BertModel.from_pretrained('bert-base-multilingual-cased').to(device)
     bert_model.eval()
 
     # 準備 Dataset & DataLoader
-    dataset = KlokaCrawledDataset(cfg, split=split)
+    dataset = KlokaCrawledDataset(cfg, split=split, config_names=cfg.config_names,)
     batch_sampler = SortedBatchSampler(
                     batch_size = cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -200,8 +245,8 @@ def generate_pseudo_labels(cfg, split):
                     )
     loader = DataLoader(
                     dataset,
-                    batch_size=cfg.batch_size,
-                    num_workers=cfg.num_worker ,
+                    batch_sampler=batch_sampler,
+                    num_workers=cfg.num_worker,
                     collate_fn=Collator_kloka_crawled_pseudo(),
                     )
 
@@ -216,23 +261,45 @@ def generate_pseudo_labels(cfg, split):
             input_ids = batch["input_ids"].to(device)  
             labels = batch["labels"].long().to(device)
             dec_input_ids = batch["dec_input_ids"].long().to(device) 
-            translations = batch["translations"]
+            all_translations = batch["all_translations"] 
+            # all_translations: list of length = batch_size
+            # each element is a list of strings for that sample's translations
 
-            # 1) BERT embedding (batch)
-            bert_inputs = bert_tokenizer(
-                translations,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=512
-            ).to(device)
-            bert_outputs = bert_model(**bert_inputs)
-            xt = bert_outputs.last_hidden_state  # [B, seq_bert, hidden]
+            # 假設每個 sample 有相同數量的翻譯 texts
+            num_samples = len(all_translations)           # batch_size
+            num_translations = len(all_translations[0])   # 每個 sample 的翻譯數量
+
+            all_xt = []
+            # 迴圈跑 num_translations 次，每次收集 "整個 batch" 對應的某個翻譯索引
+            for t_idx in range(num_translations):
+                # 收集「batch 中所有樣本」在第 t_idx 個翻譯
+                batch_texts_for_this_translation = []
+                for s_idx in range(num_samples):
+                    # 取第 s_idx 個 sample 的第 t_idx 筆翻譯
+                    text_t = all_translations[s_idx][t_idx]
+                    batch_texts_for_this_translation.append(text_t)
+
+                # 一次把這批文字 (大小 = batch_size) 丟給 BERT
+                tokenized = bert_tokenizer(
+                    batch_texts_for_this_translation,
+                    return_tensors='pt',
+                    padding=True,
+                    truncation=True,
+                    max_length=448
+                ).to(device)
+
+                outputs = bert_model(**tokenized)
+                outputs_last_hidden_state = outputs.last_hidden_state  # shape = [batch_size, seq_len, hidden_size]
+                
+                all_xt.append(outputs_last_hidden_state)
+            
+            # 這樣 all_xt 就是一個 list，長度 = num_translations
+            # all_xt[t] shape = [batch_size, seq_len, hidden_size]
 
             # 2) Teacher Forward
             teacher_feat = teacher.encoder(input_ids)  # [B, T', n_audio_state]
             teacher_out = teacher.decoder(
-                dec_input_ids, teacher_feat, xt_list=[xt]
+                dec_input_ids, teacher_feat, xt_list=all_xt
             )  # => shape [B, dec_len_max, vocab_size]
             
             labels[labels == -100] = tokenizer.eot
@@ -247,8 +314,8 @@ def generate_pseudo_labels(cfg, split):
                     tokens[i, torch.arange(eot_find.shape[1]).cuda() > first_eot] = tokenizer.eot
 
             for i, (o, l) in enumerate(zip(tokens, labels)):
-                decoded_o = tokenizer.decode([t.item() for t in o if t.item() not in special_token_set])
-                decoded_l = tokenizer.decode([t.item() for t in l if t.item() not in special_token_set])
+                decoded_o = tokenizer.decode([t for t in o if t.item() not in special_token_set])
+                decoded_l = tokenizer.decode([t for t in l if t.item() not in special_token_set])
 
                 normalized_o = text_normalizer(decoded_o)
                 normalized_l = text_normalizer(decoded_l)

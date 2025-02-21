@@ -15,7 +15,7 @@ from pytorch_lightning.strategies import DDPStrategy
 from tqdm import tqdm
 from utils import (
     add_noise,
-    WhisperTextCollatorWhithPadding_kloka_crawled,
+    kloka_crawled_collator_with_trans,
     whisper_optimizer,
     whisper_flamingo_optimizer,
     setup_logging_and_checkpoint_kloka_crawled,
@@ -34,7 +34,9 @@ import copy
 import torch.nn.functional as F
 
 # my command
-# python -u distil-whisper-flamingo_kloka_crawled.py config/audio-text/distil-whisper-flamingo_kloka_crawled.yaml
+# python -u transkd-asr_kloka_crawled.py config/audio-text/transkd-asr_truku_bilingual.yaml
+# python -u transkd-asr_kloka_crawled.py config/audio-text/transkd-asr_seediq_bilingual.yaml
+# python -u transkd-asr_kloka_crawled.py config/audio-text/transkd-asr_amis_bilingual.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -42,74 +44,108 @@ seed_everything(SEED, workers=True)
 HF_TOKEN = "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"
 
 class KlokaCrawledDataset(Dataset):
-    def __init__(self, split, tokenizer, sample_rate, model_name, max_length, config_names,
+    def __init__(self, split, tokenizer, sample_rate, model_name, lang, max_length, config_names, translation_csv=None,
                 use_pseudo_labels=False, pseudo_dict=None, is_train=False) -> None:
         super().__init__()
         
         # 根據 split 選擇不同的 dataset
         dataset_name = "formospeech/kloka_crawled_asr_train" if split == 'train' else "formospeech/kloka_crawled_asr_eval"
 
-        # 將 config_names 轉為列表
+        # 這裡若 config_names 為字串，會先分割，再依序下載
         if isinstance(config_names, str):
             config_names = config_names.split("+")
 
-        all_datasets = []
-        for config_name in config_names:
-            config_name = config_name.strip()
+        # 若只需要單一 config 就不做合併
+        if len(config_names) == 1:
+            config_name = config_names[0].strip()
             ds = load_dataset(
                 dataset_name,
                 name=config_name,
                 split='train',
                 use_auth_token=HF_TOKEN
             )
-            
+
             # 取得原始數據筆數
             original_count = len(ds)
-            
-            # 過濾掉 chinese 欄位為空的數據
-            ds_filtered = ds.filter(lambda example: example.get("chinese", "").strip() != "")
-            
+            ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
+
             # 取得過濾後的數據筆數
-            filtered_count = len(ds_filtered)
-            
-            print(f"Config '{config_name}': 原始筆數 = {original_count}, 過濾後筆數 = {filtered_count}")
-            
-            all_datasets.append(ds_filtered)
+            filtered_count = len(ds)
+            self.dataset = ds
+            # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
+            print(f"{split} set for '{config_name}' size: {len(self.dataset)}")
+        else:
+            # 訓練時使用多個 config 的合併
+            all_datasets = []
+            for config_name in config_names:
+                config_name = config_name.strip()
+                ds = load_dataset(
+                    dataset_name,
+                    name=config_name,
+                    split='train',
+                    use_auth_token=HF_TOKEN
+                )
 
-        # 使用 concatenate_datasets 合併所有 dataset
-        self.dataset = concatenate_datasets(all_datasets)
+                # 取得原始數據筆數
+                original_count = len(ds)
+                ds = ds.filter(lambda example: example.get("chinese", "").strip() != "")
 
-        print(f"{split} set size (filtered & merged): {len(self.dataset)}")
-        
-        # self.split = split
+                # 取得過濾後的數據筆數
+                filtered_count = len(ds)
+                # print(f"Config '{config_name}': original count = {original_count}, filtered count = {filtered_count}")
+                all_datasets.append(ds)
+            self.dataset = concatenate_datasets(all_datasets)
+            print(f"{split} set (merged) size: {len(self.dataset)}")
+
         self.sample_rate = sample_rate
         self.tokenizer = tokenizer
         self.model_name = model_name
+
+        self.lang = lang
         self.max_length = max_length
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
 
         self.is_train = is_train
         self.use_pseudo_labels = use_pseudo_labels
         self.pseudo_dict = pseudo_dict # { id: (pseudo_text, ground_truth) }
+        
+        # 若提供了 translation_csv 則讀取印尼文翻譯對應表（CSV需包含欄位：id, chinese, translation）
+        self.translation_dict = {}
+        if translation_csv is not None:
+            try:
+                df = pd.read_csv(translation_csv)
+                # 以 id 為 key，translation 為 value
+                self.translation_dict = dict(zip(df["id"].astype(str), df["translation"]))
+                print(f"Loaded {len(self.translation_dict)} translation entries from {translation_csv}")
+            except Exception as e:
+                print(f"Failed to load translation CSV: {e}")
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, id):
-        lang = cfg.lang
+        lang = self.lang
         item = self.dataset[id]
-        audio_id = item["id"]
+       # 取出原始資料中的 id
+        item_id = str(item.get("id", id))
         wav_data = item['audio']['array']
         wav_lens = len(wav_data)
         chinese = item['chinese']
-
+        # 這裡原本的 chinese 欄位為中文翻譯，但我們希望使用印尼文翻譯
+        # 如果 translation_dict 中有對應的翻譯，則使用；否則 fallback 為原有的 chinese 欄位
+        if item_id in self.translation_dict:
+            indonesian = self.translation_dict[item_id]
+        else:
+            indonesian = ""
+        if not isinstance(indonesian, str):
+            indonesian = "" if np.isnan(indonesian) else str(indonesian)    
         # =========== 決定 text ===========
         if (not self.is_train) or (not self.use_pseudo_labels):
             # eval set 或者根本沒用 pseudo
             text = item["text"]
         else:
             # train set + pseudo
-            pseudo_label, _ = self.pseudo_dict[audio_id]
+            pseudo_label, _ = self.pseudo_dict[item_id]
             if not isinstance(pseudo_label, str) or not pseudo_label.strip():
                 text = item["text"]
             else:
@@ -118,6 +154,7 @@ class KlokaCrawledDataset(Dataset):
 
         text = self.text_normalizer(text)
         chinese = self.text_normalizer(chinese)
+        indonesian = self.text_normalizer(indonesian)
         
         audio = wav_data.flatten().astype(np.float32)
 
@@ -133,13 +170,17 @@ class KlokaCrawledDataset(Dataset):
                         self.tokenizer.no_timestamps] + \
                         self.tokenizer.encode(" " + text)
         labels = dec_input_ids[1:] + [self.tokenizer.eot]
+        
+        all_translations = []
+        all_translations.append(chinese)
+        all_translations.append(indonesian)
 
         return {
             "wav_lens": wav_lens,
+            "all_translations": all_translations,
             "input_ids": mel,
             "dec_input_ids": dec_input_ids,
             "labels": labels,
-            "translations": chinese,
         }
 
 class DistillWhisperModule(LightningModule):
@@ -218,30 +259,50 @@ class DistillWhisperModule(LightningModule):
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
     
         # 初始化 BERT 分詞器和模型
-        self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
-        self.bert_model = BertModel.from_pretrained('bert-base-chinese').to(self.device)
+        self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
+        self.bert_model = BertModel.from_pretrained('bert-base-multilingual-cased').to(self.device)
 
     def training_step(self, batch, batch_id):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translations = batch["translations"]
+        all_translations = batch["all_translations"]
+        # all_translations: list of length = batch_size
+        # each element is a list of strings for that sample's translations
 
-        # ====== 1) Teacher (無梯度) ======
-        with torch.no_grad():
-            # 取得翻譯 embeddings
-            bert_inputs = self.bert_tokenizer(
-                translations,
+        # 假設每個 sample 有相同數量的翻譯 texts
+        num_samples = len(all_translations)           # batch_size
+        num_translations = len(all_translations[0])   # 每個 sample 的翻譯數量
+
+        all_xt = []
+        # 迴圈跑 num_translations 次，每次收集 "整個 batch" 對應的某個翻譯索引
+        for t_idx in range(num_translations):
+            # 收集「batch 中所有樣本」在第 t_idx 個翻譯
+            batch_texts_for_this_translation = []
+            for s_idx in range(num_samples):
+                # 取第 s_idx 個 sample 的第 t_idx 筆翻譯
+                text_t = all_translations[s_idx][t_idx]
+                batch_texts_for_this_translation.append(text_t)
+
+            # 一次把這批文字 (大小 = batch_size) 丟給 BERT
+            tokenized = self.bert_tokenizer(
+                batch_texts_for_this_translation,
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
-                max_length=512
+                max_length=448
             ).to(self.device)
-            bert_outputs = self.bert_model(**bert_inputs)
-            xt = bert_outputs.last_hidden_state
 
-            teacher_feat = self.teacher.encoder(input_ids)
-            teacher_out = self.teacher.decoder(dec_input_ids, teacher_feat, xt_list=[xt])
+            outputs = self.bert_model(**tokenized)
+            outputs_last_hidden_state = outputs.last_hidden_state  # shape = [batch_size, seq_len, hidden_size]
+
+            all_xt.append(outputs_last_hidden_state)
+
+        # 這樣 all_xt 就是一個 list，長度 = num_translations
+        # all_xt[t] shape = [batch_size, seq_len, hidden_size]
+
+        teacher_feat = self.teacher.encoder(input_ids)
+        teacher_out = self.teacher.decoder(dec_input_ids, teacher_feat, xt_list=all_xt)
 
         # ====== 2) Student ======
         if self.cfg.freeze_encoder:
@@ -287,23 +348,43 @@ class DistillWhisperModule(LightningModule):
         input_ids = batch["input_ids"]
         labels = batch["labels"].long()
         dec_input_ids = batch["dec_input_ids"].long()
-        translations = batch["translations"]
-        
-        # ====== 1) Teacher (無梯度) ======
-        with torch.no_grad():
-            # 取得翻譯 embeddings
-            bert_inputs = self.bert_tokenizer(
-                translations,
+        all_translations = batch["all_translations"]
+        # all_translations: list of length = batch_size
+        # each element is a list of strings for that sample's translations
+
+        # 假設每個 sample 有相同數量的翻譯 texts
+        num_samples = len(all_translations)           # batch_size
+        num_translations = len(all_translations[0])   # 每個 sample 的翻譯數量
+
+        all_xt = []
+        # 迴圈跑 num_translations 次，每次收集 "整個 batch" 對應的某個翻譯索引
+        for t_idx in range(num_translations):
+            # 收集「batch 中所有樣本」在第 t_idx 個翻譯
+            batch_texts_for_this_translation = []
+            for s_idx in range(num_samples):
+                # 取第 s_idx 個 sample 的第 t_idx 筆翻譯
+                text_t = all_translations[s_idx][t_idx]
+                batch_texts_for_this_translation.append(text_t)
+
+            # 一次把這批文字 (大小 = batch_size) 丟給 BERT
+            tokenized = self.bert_tokenizer(
+                batch_texts_for_this_translation,
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
-                max_length=512
+                max_length=448
             ).to(self.device)
-            bert_outputs = self.bert_model(**bert_inputs)
-            xt = bert_outputs.last_hidden_state
 
-            teacher_feat = self.teacher.encoder(input_ids)
-            teacher_out = self.teacher.decoder(dec_input_ids, teacher_feat, xt_list=[xt])
+            outputs = self.bert_model(**tokenized)
+            outputs_last_hidden_state = outputs.last_hidden_state  # shape = [batch_size, seq_len, hidden_size]
+            
+            all_xt.append(outputs_last_hidden_state)
+        
+        # 這樣 all_xt 就是一個 list，長度 = num_translations
+        # all_xt[t] shape = [batch_size, seq_len, hidden_size]
+
+        teacher_feat = self.teacher.encoder(input_ids)
+        teacher_out = self.teacher.decoder(dec_input_ids, teacher_feat, xt_list=all_xt)
 
         # ====== 2) Student ======
         if self.cfg.freeze_encoder:
@@ -392,11 +473,12 @@ class DistillWhisperModule(LightningModule):
             self.log("{}/ce_loss_{}".format(log_prefix, mod), ce_loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/kd_loss_{}".format(log_prefix, mod), kd_loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/loss_{}".format(log_prefix, mod), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+            self.log("{}/cer_{}".format(log_prefix, mod), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/wer_{}".format(log_prefix, mod), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
             self.log("{}/acc_{}".format(log_prefix, mod), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        
+
         return
-       
+
     def configure_optimizers(self):
         optimizer, scheduler = whisper_optimizer(self.student, self.cfg, self.t_total)
         self.optimizer, self.scheduler = optimizer, scheduler
@@ -408,48 +490,54 @@ class DistillWhisperModule(LightningModule):
 
     def train_dataloader(self):
         dataset = KlokaCrawledDataset('train',
-                                    self.tokenizer, 
+                                    self.tokenizer,
                                     SAMPLE_RATE,
                                     self.model_name,
+                                    self.cfg.lang,
                                     max_length=self.cfg.audio_max_length,
                                     config_names=cfg.config_names,
+                                    translation_csv=self.cfg.translation_csv_train,
                                     use_pseudo_labels=cfg.use_pseudo_labels,
                                     pseudo_dict=getattr(self, "pseudo_dict_train", None),
                                     is_train=True
                                     )
         batch_sampler = SortedBatchSampler(
-                    batch_size = self.cfg.batch_size,
-                    shapes=[(item['wav_lens']) for item in dataset],
-                    sort_in_batch='descending',
-                    sort_batch='descending',
-                    drop_last=True)
-        if cfg.num_devices > 1:
+                                    batch_size = self.cfg.batch_size,
+                                    shapes=[(item['wav_lens']) for item in dataset],
+                                    sort_in_batch='descending',
+                                    sort_batch='descending',
+                                    drop_last=True
+                                    )
+        if self.cfg.num_devices > 1:
             print("Using distributed sampler")
             batch_sampler = DistributedSamplerWrapper(batch_sampler)
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_kloka_crawled()
+                          collate_fn=kloka_crawled_collator_with_trans()
                           )
 
     def val_dataloader(self):
         dataset = KlokaCrawledDataset('eval',
-                                    self.tokenizer, 
+                                    self.tokenizer,
                                     SAMPLE_RATE,
                                     self.model_name,
+                                    self.cfg.lang,
                                     max_length=self.cfg.audio_max_length,
-                                    config_names=cfg.config_names,
+                                    config_names=self.cfg.config_names,
+                                    translation_csv=self.cfg.translation_csv_eval,
                                     )
         batch_sampler = SortedBatchSampler(
-                    batch_size = self.cfg.batch_size,
-                    shapes=[(item['wav_lens']) for item in dataset],
-                    sort_in_batch='descending',
-                    sort_batch='descending',
-                    drop_last=False)
+                                    batch_size = self.cfg.batch_size,
+                                    shapes=[(item['wav_lens']) for item in dataset],
+                                    sort_in_batch='descending',
+                                    sort_batch='descending',
+                                    drop_last=False
+                                    )
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=WhisperTextCollatorWhithPadding_kloka_crawled()
+                          collate_fn=kloka_crawled_collator_with_trans()
                           )
 
 def partial_init_student_from_teacher(teacher_model, student_model):
@@ -487,8 +575,9 @@ if __name__ == "__main__":
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
-            name="distil-whisper-flamingo_seediq",
-            # name="distil-whisper-flamingo_amis",
+            # name="transkd-asr_truku_bilingual",
+            # name="transkd-asr_seediq_bilingual",
+            name="transkd-asr_amis_bilingual",
     )
     
     callback_list = setup_logging_and_checkpoint_kloka_crawled(cfg.log_output_dir, 
@@ -505,7 +594,7 @@ if __name__ == "__main__":
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
-    
+
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
         precision=cfg.precision,

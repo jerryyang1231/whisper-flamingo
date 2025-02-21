@@ -5,22 +5,22 @@ accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 500
+validate_every_n_batches: 200
 num_devices: 1
 precision: 16-mixed
 
 model_name: small
 learning_rate: 2.0e-5
 batch_size: 4
-num_train_steps: 50000
-warmup_steps: 5000
+num_train_steps: 20000
+warmup_steps: 2000
 gradient_accumulation_steps: 2
 
 monitor: 'eval/wer_at'
 noise_prob: 0.0
 noise_snr_train: 0
 
-spec_augment: ""
+spec_augment: "ls-basic"
 dropout_rate: 0
 
 lang: id
@@ -28,11 +28,11 @@ config_names: "太魯閣"
 resume_training: False
 
 pt_ckpt: 'whisper_finetune_truku/step-38500-wer=0.0938.ckpt'
-train_id: Trans-ASR_truku_ind_tune_parmas
+train_id: trans-asr_truku_bilingual_spec_augment
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
-num_langs: 1
+num_langs: 2
 
 translation_csv_train: "/share/nas169/jerryyang/whisper-flamingo/translation/太魯閣_translated_ind_train.csv"
 translation_csv_eval: "/share/nas169/jerryyang/whisper-flamingo/translation/太魯閣_translated_ind_eval.csv"

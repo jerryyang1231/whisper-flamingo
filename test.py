@@ -1,20 +1,27 @@
 from datasets import load_dataset
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
+import torch
+from evaluate import load
 
-# 下載資料集
-dataset = load_dataset(
-    "formospeech/kloka_crawled_asr_train",
-    name="太魯閣",
-    split="train",
-    use_auth_token="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"
-)
+# librispeech_test_clean = load_dataset("librispeech_asr", "clean", split="test")
+librispeech_test_other = load_dataset("librispeech_asr", "other", split="test")
 
-# 原始數據筆數
-original_count = len(dataset)
-print(f"原始數據集總筆數: {original_count}")
+processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small").to("cuda")
 
-# 過濾掉 chinese 欄位為空的資料
-filtered_dataset = dataset.filter(lambda example: example.get("chinese", "").strip() != "")
+def map_to_pred(batch):
+    audio = batch["audio"]
+    input_features = processor(audio["array"], sampling_rate=audio["sampling_rate"], return_tensors="pt").input_features
+    batch["reference"] = processor.tokenizer._normalize(batch['text'])
 
-# 過濾後的數據筆數
-filtered_count = len(filtered_dataset)
-print(f"過濾後剩餘的數據筆數: {filtered_count}")
+    with torch.no_grad():
+        predicted_ids = model.generate(input_features.to("cuda"))[0]
+    transcription = processor.decode(predicted_ids)
+    batch["prediction"] = processor.tokenizer._normalize(transcription)
+    return batch
+
+# result = librispeech_test_clean.map(map_to_pred)
+result = librispeech_test_other.map(map_to_pred)
+
+wer = load("wer")
+print(100 * wer.compute(references=result["reference"], predictions=result["prediction"]))

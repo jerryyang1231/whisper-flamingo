@@ -136,7 +136,7 @@ class LibriSpeechTextDataset(Dataset):
 
         n_mels = 80 if self.model_name != 'large-v3' else 128
         mel = whisper.log_mel_spectrogram(audio, n_mels=n_mels) 
-    
+
         if self.spec_augment:
             if self.spec_augment == "ls-double":
                 mel = torch.from_numpy(spec_augment(mel.T.numpy(), audio_frames)).T
@@ -195,8 +195,8 @@ class WhisperTextModule(LightningModule):
             except BaseException as e: 
                 print(str(e))
                 print("Loading weights with strict=False")
-                self.model.load_state_dict(state_dict_updated, strict=False) 
-                
+                self.model.load_state_dict(state_dict_updated, strict=False)
+
         if self.cfg.add_gated_x_attn != 0: # freeze whisper encoder gradients for x-attn
             for p in self.model.encoder.parameters():
                 p.requires_grad = False
@@ -342,7 +342,7 @@ class WhisperTextModule(LightningModule):
                 # 對解碼結果進行正規化
                 normalized_o = self.text_normalizer(decoded_o)
                 normalized_l = self.text_normalizer(decoded_l)
-                
+
                 # 將正規化的結果添加到列表中
                 o_list.append(normalized_o)
                 l_list.append(normalized_l)
@@ -362,7 +362,7 @@ class WhisperTextModule(LightningModule):
         self.log("{}/acc_{}".format(log_prefix[dataloader_idx], mod), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
 
         return
-       
+
     def configure_optimizers(self):
         model = self.model
         if self.cfg.add_gated_x_attn != 0:
@@ -387,20 +387,22 @@ class WhisperTextModule(LightningModule):
                                     noise_prob=cfg.noise_prob,
                                     noise_snr=cfg.noise_snr_train,
                                     translation_base_dirs=cfg.translation_base_dirs
-                                    )  
+                                    )
         batch_sampler = SortedBatchSampler(
                     batch_size = self.cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
                     sort_in_batch='descending',
                     sort_batch='descending',
-                    drop_last=True)
+                    drop_last=True
+                    )
         if cfg.num_devices > 1:
             print("Using distributed sampler")
             batch_sampler = DistributedSamplerWrapper(batch_sampler)
         return torch.utils.data.DataLoader(dataset,
                           batch_sampler=batch_sampler,
                           num_workers=self.cfg.num_worker,
-                          collate_fn=Multiple_language_collator())
+                          collate_fn=Multiple_language_collator()
+                          )
 
     def val_dataloader_clean(self):
         dataset = LibriSpeechTextDataset('validation.clean',
@@ -499,8 +501,6 @@ if __name__ == "__main__":
     print(cfg)
     print("audio max length: {}".format(cfg.audio_max_length))
 
-    # API Key
-    wandb.login(key="643af3c5874c573aab4168b3d9d9a4c23fa49463")
     # Initialize WandB
     wandb.init(project="whisper-flamingo",
             config=cfg,
@@ -579,7 +579,7 @@ if __name__ == "__main__":
     
     # Create a WandB logger instance
     wandb_logger = WandbLogger()
-    
+
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.num_devices > 1 else "auto"
     trainer = Trainer(
         precision=cfg.precision,

@@ -1,34 +1,33 @@
 train_name: whisper
-audio_max_length: 480000  # 30 sec
+audio_max_length: 480000 # 30 sec
 text_max_length: null
 accelerator: auto
 weight_decay: 0.01
 adam_epsilon: 1.0e-8
 num_worker: 16
-validate_every_n_batches: 100
+validate_every_n_batches: 200
 num_devices: 1
 precision: 16-mixed
 
 model_name: small
-learning_rate: 2.0e-5
+learning_rate: 1.0e-6
 batch_size: 8
-num_train_steps: 10000
-warmup_steps: 1000
-gradient_accumulation_steps: 2
+num_train_steps: 20000
+warmup_steps: 2000
+gradient_accumulation_steps: 1
 
 monitor: 'eval/wer_at'
 noise_prob: 0.0
 noise_snr_train: 0
 
-spec_augment: ""
-dropout_rate: 0
+dropout_rate: 0 
 
 lang: id
 config_names: "賽德克_德固達雅"
-resume_training: false
+resume_training: False
 
-pt_ckpt: 'whisper_finetune_seediq_Tgdaya/step-31200-wer=0.1321.ckpt'
-train_id: Trans-ASR_seediq_Tgdaya_bilingual
+teacher_ckpt: 'Trans-ASR_seediq_Tgdaya_bilingual/step-02000-wer_at=0.1270.ckpt'
+train_id: transkd-asr_seediq_tgdaya
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
@@ -36,6 +35,14 @@ num_langs: 2
 
 translation_csv_train: "/share/nas169/jerryyang/whisper-flamingo/translation/賽德克_德固達雅_translated_ind_train.csv"
 translation_csv_eval: "/share/nas169/jerryyang/whisper-flamingo/translation/賽德克_德固達雅_translated_ind_eval.csv"
+
+# distil
+freeze_encoder: 1
+alpha: 0.8
+beta: 1.0
+temperature: 2.0
+use_pseudo_labels: True
+pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/kloka_crawled/flamingo/seediq_Tgdaya_bilingual_train.csv
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
