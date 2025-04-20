@@ -145,7 +145,7 @@ class KlokaCrawledDataset(Dataset):
         all_translations.append(translation_text)
 
         return {
-            "ids": item["id"],
+            "ids": item_id,
             "wav_lens": wav_lens,
             "all_translations": all_translations,
             "input_ids": mel,
@@ -235,7 +235,10 @@ def generate_pseudo_labels(cfg, split):
     bert_model.eval()
 
     # 準備 Dataset & DataLoader
-    dataset = KlokaCrawledDataset(cfg, split=split, config_names=cfg.config_names,)
+    dataset = KlokaCrawledDataset(cfg,
+                                split=split,
+                                config_names=cfg.config_names,
+                                )
     batch_sampler = SortedBatchSampler(
                     batch_size = cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -290,7 +293,7 @@ def generate_pseudo_labels(cfg, split):
 
                 outputs = bert_model(**tokenized)
                 outputs_last_hidden_state = outputs.last_hidden_state  # shape = [batch_size, seq_len, hidden_size]
-                
+
                 all_xt.append(outputs_last_hidden_state)
             
             # 這樣 all_xt 就是一個 list，長度 = num_translations
@@ -298,11 +301,10 @@ def generate_pseudo_labels(cfg, split):
 
             # 2) Teacher Forward
             teacher_feat = teacher.encoder(input_ids)  # [B, T', n_audio_state]
-            teacher_out = teacher.decoder(
-                dec_input_ids, teacher_feat, xt_list=all_xt
-            )  # => shape [B, dec_len_max, vocab_size]
-            
+            teacher_out = teacher.decoder(dec_input_ids, teacher_feat, xt_list=all_xt)  # => shape [B, dec_len_max, vocab_size]
+
             labels[labels == -100] = tokenizer.eot
+
             # 3) decode for each sample in batch
             tokens = torch.argmax(teacher_out, dim=2)  # [B, dec_len_max]
             eot_find = (torch.where(tokens == tokenizer.eot, 1, 0))
@@ -335,7 +337,6 @@ def generate_pseudo_labels(cfg, split):
     df = pd.DataFrame(results)
     df.to_csv(csv_name, index=False, encoding="utf-8")
     print(f"Done! Pseudo labels saved to: {csv_name}")
-
 
 ################################################################################
 # 4. Main

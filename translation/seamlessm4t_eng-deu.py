@@ -16,14 +16,15 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
 
 # 設置源語言和目標語言
-tokenizer.src_lang = "en"
+tokenizer.src_lang = "eng"
 
 def translate_batch(texts):
     try:
         # 將多個文本編碼為批量輸入
         encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
         # 批量生成翻譯文本
-        generated_tokens = model.generate(**encoded, tgt_lang="deu")
+        with torch.no_grad():
+            generated_tokens = model.generate(**encoded, tgt_lang="deu")
         # 批量解碼
         translated_texts = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         return translated_texts

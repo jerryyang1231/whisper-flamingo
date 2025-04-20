@@ -1,0 +1,41 @@
+train_name: whisper
+audio_max_length: 320000 # 20 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 150
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 1.25e-5 # small
+batch_size: 4
+num_train_steps: 15000
+warmup_steps: 1500
+gradient_accumulation_steps: 1
+
+monitor: 'dev/wer_at'
+noise_prob: 0.0
+noise_snr_train: 0
+
+spec_augment: ""
+dropout_rate: 0 
+
+lang: en
+resume_training: False
+
+pt_ckpt: 'whisper_finetune_ml-superb/step-02700-wer=0.0939.ckpt'
+train_id: transASR_ml-superb
+
+# flamingo
+add_gated_x_attn: 1 # 0 for False, 1 for True
+num_langs: 1
+
+train_translated_json_path: "/share/nas169/jerryyang/corpus/ml-superb/eng/eng_train_translated.json"
+dev_translated_json_path: "/share/nas169/jerryyang/corpus/ml-superb/eng/eng_dev_translated.json"
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-wer_at={dev/wer_at:.4f}"

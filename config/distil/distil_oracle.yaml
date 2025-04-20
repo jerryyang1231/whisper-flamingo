@@ -1,0 +1,48 @@
+train_name: whisper
+audio_max_length: 480000 # 30 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 2000
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 1.0e-6
+batch_size: 4
+num_train_steps: 240000
+warmup_steps: 24000
+gradient_accumulation_steps: 1
+
+monitor: 'dev-other/wer_at'
+noise_prob: 0.0
+noise_snr_train: 0
+
+spec_augment: ""
+dropout_rate: 0 
+
+lang: en
+resume_training: False
+
+teacher_ckpt: 'monolingual-oracle/step-480000-wer_at=0.0245.ckpt'
+train_id: distil_oracle
+
+# flamingo
+add_gated_x_attn: 1 # 0 for False, 1 for True
+num_langs: 1
+
+# distil
+freeze_encoder: 1
+alpha: 0.8
+beta: 1.0
+temperature: 2.0
+use_pseudo_labels: True
+
+# path
+pseudo_csv_path_train: "/share/nas169/jerryyang/TransKD-ASR/pseudo_labels/librispeech/flamingo/monolingual-oracle/pseudo_labels_train.clean.100+train.clean.360+train.other.500.csv"
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-wer_at={dev-other/wer_at:.4f}"

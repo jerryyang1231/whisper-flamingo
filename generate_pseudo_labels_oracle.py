@@ -15,15 +15,15 @@ from transformers import BertModel, BertTokenizer
 from utils_batch_samplers import SortedBatchSampler
 
 # my command
-# python generate_pseudo_labels_librispeech_flamingo.py config/pseudo_labels/generate_pseudo_labels_librispeech_flamingo.yaml train.clean.100+train.clean.360+train.other.500
-# python generate_pseudo_labels_librispeech_flamingo.py config/pseudo_labels/generate_pseudo_labels_librispeech_flamingo.yaml test.clean
+# python generate_pseudo_labels_oracle.py config/pseudo_labels/generate_pseudo_labels_oracle.yaml train.clean.100+train.clean.360+train.other.500
+# python generate_pseudo_labels_oracle.py config/pseudo_labels/generate_pseudo_labels_oracle.yaml test.clean
 
 ################################################################################
 # 1. Dataset 
 ################################################################################
 
 class LibriSpeechTextDataset_Pseudo(Dataset):
-    def __init__(self, cfg, hf_split, translation_base_dirs=None) -> None:
+    def __init__(self, cfg, hf_split) -> None:
         super().__init__()
        
         # Hugging Face split 到自定義 split 的映射字典
@@ -51,8 +51,6 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
         self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
         self.model_name = cfg.model_name
         self.audio_max_length = cfg.audio_max_length
-
-        self.translation_base_dirs = translation_base_dirs
         self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
 
     def __len__(self):
@@ -110,10 +108,7 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
         
         # 針對每一個翻譯資料夾，取出翻譯文字
         all_translations = []
-        for base_dir in self.translation_base_dirs:
-            t = self.get_translation_text(file_id, base_dir)
-            t = self.text_normalizer(t)  # 正規化
-            all_translations.append(t)
+        all_translations.append(text)
 
         return {
             "ids": file_id,
@@ -178,7 +173,7 @@ def generate_pseudo_labels(cfg, split):
     print("Loading Teacher Model ...")
     teacher = whisper.load_model(cfg.model_name,
                                 device="cpu",  # 先載到 CPU
-                                download_root='/share/nas169/jerryyang/whisper-flamingo/models',
+                                download_root='/share/nas169/jerryyang/TransKD-ASR/models',
                                 dropout_rate = cfg.dropout_rate,
                                 add_gated_x_attn = cfg.add_gated_x_attn,
                                 num_langs = cfg.num_langs,
@@ -186,7 +181,7 @@ def generate_pseudo_labels(cfg, split):
 
     # 如果有 teacher_ckpt
     if cfg.teacher_ckpt != '':
-        checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
+        checkpoint_root = '/share/nas169/jerryyang/TransKD-ASR/models/checkpoints/'
         state_dict = torch.load(os.path.join(checkpoint_root, cfg.teacher_ckpt), map_location='cpu')
         state_dict = state_dict['state_dict']
         state_dict_updated = {k[6:]: v for k, v in state_dict.items()}
@@ -202,10 +197,7 @@ def generate_pseudo_labels(cfg, split):
     bert_model.eval()
 
     # 準備 Dataset & DataLoader
-    dataset = LibriSpeechTextDataset_Pseudo(cfg,
-                                            split,
-                                            cfg.translation_base_dirs,
-                                            )
+    dataset = LibriSpeechTextDataset_Pseudo(cfg, split)
     batch_sampler = SortedBatchSampler(
                     batch_size = cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -218,7 +210,7 @@ def generate_pseudo_labels(cfg, split):
                     batch_sampler=batch_sampler,
                     num_workers=cfg.num_worker,
                     collate_fn=CollatorWhithPadding_librispeech_pseudo(),
-                )
+                    )
 
     tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
     special_token_set = set(tokenizer.special_tokens.values())

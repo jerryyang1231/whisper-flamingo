@@ -16,14 +16,15 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
 
 # 設置源語言和目標語言
-tokenizer.src_lang = "en"
+tokenizer.src_lang = "eng"
 
 def translate_batch(texts):
     try:
         # 將多個文本編碼為批量輸入
         encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
         # 批量生成翻譯文本
-        generated_tokens = model.generate(**encoded, tgt_lang="kor")
+        with torch.no_grad():
+            generated_tokens = model.generate(**encoded, tgt_lang="ita")
         # 批量解碼
         translated_texts = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
         return translated_texts
@@ -85,7 +86,7 @@ def process_directory_multithreaded(root_dir, output_dir, max_workers=4, batch_s
                 logging.error(f"Error in thread execution: {e}")
 
 librispeech_path = "/share/nas169/jerryyang/corpus/LibriSpeech/LibriSpeech"  # 替換為實際路徑
-output_path = "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Korean"  # 替換為實際輸出路徑
+output_path = "/share/nas169/jerryyang/corpus/seamlessm4t/LibriSpeech/Italian"  # 替換為實際輸出路徑
 
 datasets = ["train-clean-100", "train-clean-360", "train-other-500", "dev-clean", "dev-other", "test-clean", "test-other"]
 for dataset in datasets:

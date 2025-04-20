@@ -13,82 +13,57 @@ from utils import wer_cer
 from whisper.normalizers.basic import BasicTextNormalizer
 from transformers import BertModel, BertTokenizer
 from utils_batch_samplers import SortedBatchSampler
+import json
 
 # my command
-# python generate_pseudo_labels_librispeech_flamingo.py config/pseudo_labels/generate_pseudo_labels_librispeech_flamingo.yaml train.clean.100+train.clean.360+train.other.500
-# python generate_pseudo_labels_librispeech_flamingo.py config/pseudo_labels/generate_pseudo_labels_librispeech_flamingo.yaml test.clean
+# python generate_pseudo_labels_ml-superb.py config/generate_pseudo_labels_ml-superb.yaml train
 
 ################################################################################
 # 1. Dataset 
 ################################################################################
 
-class LibriSpeechTextDataset_Pseudo(Dataset):
-    def __init__(self, cfg, hf_split, translation_base_dirs=None) -> None:
+class MLSuperbDataset(Dataset):
+    def __init__(self, cfg, hf_split) -> None:
         super().__init__()
        
-        # Hugging Face split 到自定義 split 的映射字典
-        self.split_mapping = {
-            'train.clean.100': 'train-clean-100',
-            'train.clean.360': 'train-clean-360',
-            'train.other.500': 'train-other-500',
-            'validation.clean': 'dev-clean',
-            'validation.other': 'dev-other',
-            'test.clean': 'test-clean',
-            'test.other': 'test-other'
-        }
+        translated_json_path = cfg.train_translated_json_path if hf_split =='train' else cfg.dev_translated_json_path
+       
+        # 直接從 ML-SUPERB 讀取 `eng` 語言數據
+        dataset = load_dataset("espnet/ml_superb_hf", split=hf_split)
+        self.dataset = [item for item in dataset if item["language"] == "eng"]
         
-        # 保存 Hugging Face 的 split 名稱
-        self.hf_split = hf_split
-        self.custom_split_names = [
-            self.split_mapping.get(split.strip(), split.strip()) 
-            for split in hf_split.split('+')
-        ] if 'train' in hf_split else [self.split_mapping.get(hf_split, hf_split)]
+        # **載入 translated_text JSON**
+        self.translated_texts = {}
+        if translated_json_path:
+            with open(translated_json_path, "r", encoding="utf-8") as f:
+                translated_data = json.load(f)
+            # **建立 ID 對應 translated_text**
+            self.translated_texts = {item["id"]: item["translated_text"] for item in translated_data}
         
-        # 直接使用 Hugging Face datasets API 加載數據
-        self.dataset = load_dataset("librispeech_asr", split=hf_split)
-        print(f"{hf_split} size: {len(self.dataset)} samples")
+        print(f"{hf_split} (eng) size: {len(self.dataset)} samples")
+
         self.sample_rate = 16000
-        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
+        self.tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language=cfg.lang, task='transcribe')
         self.model_name = cfg.model_name
         self.audio_max_length = cfg.audio_max_length
-
-        self.translation_base_dirs = translation_base_dirs
-        self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
+        self.lang = cfg.lang
+        self.text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)  
 
     def __len__(self):
         return len(self.dataset)
-   
-    def get_translation_text(self, file_id, translation_base_dir):
-        
-        # 提取 speaker_id 和 chapter_id
-        speaker_id, chapter_id = file_id.split('-')[0], file_id.split('-')[1]
-        
-        text = ""
 
-        # 遍歷所有可能的 custom_split_names 來查找對應的翻譯文件
-        for custom_split_name in self.custom_split_names:
-            relative_dir = os.path.join(custom_split_name, speaker_id, chapter_id)
-            trans_file_path = os.path.join(translation_base_dir, relative_dir, f"{speaker_id}-{chapter_id}.trans.txt")
-            
-            # 讀取翻譯文件並提取對應行的翻譯
-            if os.path.exists(trans_file_path):
-                with open(trans_file_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        parts = line.strip().split(' ', 1)  # 進行拆分
-                        if len(parts) == 2:  # 確保拆分出兩個部分
-                            line_id, text = parts
-                            if line_id == file_id:  # 檢查行ID是否匹配
-                                return text  # 返回匹配的文本
-                
-        return text
-    
     def __getitem__(self, id):
-        lang= cfg.lang
+        lang = self.lang
         item = self.dataset[id]
-        file_id = item['id']
+        item_id = item['id']
         wav_data = item['audio']['array']
-        text = self.text_normalizer(item['text'])
         wav_lens = len(wav_data)
+
+        text = item["text"][5:].strip()        
+        translated_text = self.translated_texts.get(item["id"], None)
+
+        text = self.text_normalizer(text)
+        translated_text = self.text_normalizer(translated_text)
 
         audio = wav_data.flatten().astype(np.float32)
 
@@ -110,27 +85,25 @@ class LibriSpeechTextDataset_Pseudo(Dataset):
         
         # 針對每一個翻譯資料夾，取出翻譯文字
         all_translations = []
-        for base_dir in self.translation_base_dirs:
-            t = self.get_translation_text(file_id, base_dir)
-            t = self.text_normalizer(t)  # 正規化
-            all_translations.append(t)
+        all_translations.append(translated_text)
 
         return {
-            "ids": file_id,
-            "wav_lens": wav_lens,
-            "all_translations": all_translations,
+            "ids": item_id,
             "input_ids": mel,
-            "dec_input_ids": dec_input_ids,
             "labels": labels,
+            "dec_input_ids": dec_input_ids,
+            "all_translations": all_translations,
+            "wav_lens": wav_lens,
         }
 
 ################################################################################
 # 2. collate_fn: 用於 batch 推理
 ################################################################################
 
-class CollatorWhithPadding_librispeech_pseudo:
+class ml_superb_pseudo_collator:
     def __call__(self, features):
         ids, input_ids, labels, dec_input_ids, all_translations, wav_lens = [], [], [], [], [], []
+
         for f in features:
             ids.append(f["ids"])
             input_ids.append(f["input_ids"])
@@ -150,7 +123,7 @@ class CollatorWhithPadding_librispeech_pseudo:
         # pad the labels with -100 (dummy, ignore index in cross-entropy), pad the dec_input_ids with eot
         labels = [np.pad(lab, (0, max_label_len - lab_len), 'constant', constant_values=-100) for lab, lab_len in zip(labels, label_lengths)]
         dec_input_ids = [np.pad(e, (0, max_label_len - e_len), 'constant', constant_values=50257) for e, e_len in zip(dec_input_ids, dec_input_ids_length)]
-        
+
         # 建立 batch，根據是否有 translation_2 決定是否包含它
         batch = {
             "ids": ids,
@@ -160,7 +133,7 @@ class CollatorWhithPadding_librispeech_pseudo:
             "all_translations": all_translations,
             "wav_lens": wav_lens,
         }
-        
+
         # 只將數值類型的項目轉換為張量
         for key in ["input_ids", "labels", "dec_input_ids", "wav_lens"]:
             batch[key] = torch.tensor(np.array(batch[key]), requires_grad=False)
@@ -202,10 +175,9 @@ def generate_pseudo_labels(cfg, split):
     bert_model.eval()
 
     # 準備 Dataset & DataLoader
-    dataset = LibriSpeechTextDataset_Pseudo(cfg,
-                                            split,
-                                            cfg.translation_base_dirs,
-                                            )
+    dataset = MLSuperbDataset(cfg,
+                            split,
+                            )
     batch_sampler = SortedBatchSampler(
                     batch_size = cfg.batch_size,
                     shapes=[(item['wav_lens']) for item in dataset],
@@ -217,10 +189,10 @@ def generate_pseudo_labels(cfg, split):
                     dataset,
                     batch_sampler=batch_sampler,
                     num_workers=cfg.num_worker,
-                    collate_fn=CollatorWhithPadding_librispeech_pseudo(),
-                )
+                    collate_fn=ml_superb_pseudo_collator(),
+                    )
 
-    tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language='en', task='transcribe')
+    tokenizer = whisper.tokenizer.get_tokenizer(multilingual=True, language=cfg.lang, task='transcribe')
     special_token_set = set(tokenizer.special_tokens.values())
     text_normalizer = BasicTextNormalizer(remove_diacritics=True, split_letters=False)
 
@@ -306,7 +278,7 @@ def generate_pseudo_labels(cfg, split):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python generate_pseudo_labels_librispeech.py config.yaml {split}")
+        print(f"Usage: python generate_pseudo_labels_ml-superb.py config.yaml {split}")
         sys.exit(1)
 
     cfg_yaml = sys.argv[1]

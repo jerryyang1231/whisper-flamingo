@@ -1,0 +1,52 @@
+train_name: whisper
+audio_max_length: 320000 # 20 sec
+text_max_length: null
+accelerator: auto
+weight_decay: 0.01
+adam_epsilon: 1.0e-8
+num_worker: 16
+validate_every_n_batches: 150
+num_devices: 1
+precision: 16-mixed
+
+model_name: small
+learning_rate: 1.0e-6
+batch_size: 4
+num_train_steps: 15000
+warmup_steps: 1500
+gradient_accumulation_steps: 1
+
+monitor: 'dev/wer_at'
+noise_prob: 0.0
+noise_snr_train: 0
+
+dropout_rate: 0 
+
+lang: en
+resume_training: False
+
+teacher_ckpt: 'transASR_ml-superb/step-08100-wer_at=0.0848.ckpt'
+train_id: transKD-ASR_ml-superb (baseline)
+
+# text
+add_gated_x_attn: 1 # 0 for False, 1 for True
+num_langs: 1
+
+# tranlation
+train_translated_json_path: "/share/nas169/jerryyang/corpus/ml-superb/eng/eng_train_translated.json"
+dev_translated_json_path: "/share/nas169/jerryyang/corpus/ml-superb/eng/eng_dev_translated.json"
+
+# distil
+# freeze_encoder: 1
+freeze_encoder: 0
+alpha: 0.8
+# beta: 1.0
+beta: 0.0
+temperature: 2.0
+# use_pseudo_labels: True
+use_pseudo_labels: False
+pseudo_csv_path_train: "/share/nas169/jerryyang/whisper-flamingo/pseudo_labels/ml-superb/eng/pseudo_labels_train.csv"
+
+log_output_dir: "slurm/train_text_slurm"
+check_output_dir: "models/checkpoints"
+filename: "step-{step:05d}-wer_at={dev/wer_at:.4f}"

@@ -95,7 +95,7 @@ class WhisperDataCollatorWhithPadding:
 
         return batch
 
-class librispeech_collator:
+class whisper_collator:
     def __call__(self, features):
         input_ids, labels, dec_input_ids, wav_lens = [], [], [], []
 
@@ -104,18 +104,11 @@ class librispeech_collator:
             labels.append(f["labels"])
             dec_input_ids.append(f["dec_input_ids"])
             wav_lens.append(f["wav_lens"])
-            # audio.append(f["audio"])
 
         audio_lengths = [audio.shape[1] for audio in input_ids]
         max_audio_len = max(audio_lengths)
         input_ids = [np.pad(audio, ((0, 0), (0, max_audio_len - audio_len)), 'constant', constant_values=0)
                     for audio, audio_len in zip(input_ids, audio_lengths)]
-
-        # # Pad audio (apply the same padding logic)
-        # audio_lengths = [a.shape[0] for a in audio]  # Assuming audio is a 1D array of raw waveform
-        # max_audio_len = max(audio_lengths)
-        # audio = [np.pad(a, (0, max_audio_len - a_len), 'constant', constant_values=0) 
-        #         for a, a_len in zip(audio, audio_lengths)]
         
         label_lengths = [len(lab) for lab in labels]
         dec_input_ids_length = [len(e) for e in dec_input_ids]
@@ -132,7 +125,6 @@ class librispeech_collator:
             "labels": labels,
             "dec_input_ids": dec_input_ids,
             "wav_lens": wav_lens,
-            # "audio": audio # Add the padded audio to the batch
         }
 
         batch = {k: torch.tensor(np.array(v), requires_grad=False) for k, v in batch.items()}
@@ -425,7 +417,7 @@ class WhisperTextCollatorWhithPadding_librispeech_with_bert:
         
         return batch
     
-class Multiple_language_collator:
+class TransASR_collator:
     def __call__(self, features):
         input_ids, labels, dec_input_ids, all_translations, wav_lens = [], [], [], [], []
         for f in features:
@@ -644,6 +636,23 @@ def setup_logging_and_checkpoint_librispeech(log_output_dir, check_output_dir, t
     callback_list = [val_checkpoint,
                      LearningRateMonitor(logging_interval="step")]
     return tflogger, callback_list
+
+def setup_logging_and_checkpoint_ml_superb(log_output_dir, check_output_dir, train_name, train_id, monitor, filename):
+    Path(log_output_dir).mkdir(exist_ok=True)
+    Path(check_output_dir).mkdir(exist_ok=True)
+
+    val_checkpoint = ModelCheckpoint(
+        dirpath=f"{check_output_dir}/{train_id}",
+        filename=filename,
+        monitor=monitor,
+        mode='min',
+        save_top_k=3,
+        auto_insert_metric_name=False,
+    )
+
+    callback_list = [val_checkpoint,
+                     LearningRateMonitor(logging_interval="step")]
+    return callback_list
 
 def wer_cer(hypo, ref):
     c_err, c_len, w_err, w_len = 0, 0, 0, 0

@@ -26,9 +26,9 @@ lang: zh
 resume_training: false
 
 # pt_ckpt: ''
-pt_ckpt: 'distil-whisbert-flamingo_taigi pseudo labels(db=12, lr=1.0e-6, bs=16)/step-76000-cer_at=0.1550.ckpt'
+pt_ckpt: 'whisper_taigi_small/step-78000-cer=0.1811-wer=0.6140.ckpt'
 train_id: whisper_taigi_small
 
 log_output_dir: "slurm/train_audio_slurm"
 check_output_dir: "models/checkpoints"
-filename: "step-{step:05d}-cer_at={val/cer_at:.4f}"
+filename: "step-{step:05d}-cer={val/cer:.4f}"

@@ -23,8 +23,12 @@ from utils_batch_samplers import SortedBatchSampler
 import wandb 
 from pytorch_lightning.loggers import WandbLogger
 os.environ["WANDB_MODE"] = "disabled" 
-os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/whisper-flamingo/wandb/'
+# os.environ['WANDB_DIR'] = '/share/nas169/jerryyang/TransKD-ASR/wandb/'
 from whisper.normalizers.basic import BasicTextNormalizer
+
+# my command
+# python -u whisper_ft_taigi.py config/audio/audio_taigi_tiny.yaml
+# python -u whisper_ft_taigi.py config/audio/audio_taigi_small.yaml
 
 SAMPLE_RATE = 16000
 SEED = 3407
@@ -33,10 +37,6 @@ seed_everything(SEED, workers=True)
 valid_set_list = ['-d8TlAGYFmc', '3h8m__iwuJ4', '5mPJOkoIu3k', '87omMWX-DTw', 
                 'E0-HOPE7_QU', 'EhqcvfaaYu8', 'gDDbnFcvWcQ', 'iy1fPQQSA6c',
                 'kGbjIuzvPR8', 'MrwSzSVGiRE', 'yht8d59dCpo']
-
-# my command
-# python -u whisper_ft_taigi.py config/audio/audio_taigi_tiny.yaml
-# python -u whisper_ft_taigi.py config/audio/audio_taigi_small.yaml
 
 class YTTDTaigiTRSDataset(Dataset):
     def __init__(self, split, tokenizer, sample_rate, model_name, max_length, 
@@ -125,11 +125,11 @@ class WhisperModelModule(LightningModule):
         print("Loading Whisper model and weights")
         self.model = whisper.load_model(model_name,
                                         device='cpu', # avoid OOM on gpu 0 for distributed
-                                        download_root='/share/nas169/jerryyang/whisper-flamingo/models',
+                                        download_root='/share/nas169/jerryyang/TransKD-ASR/models',
                                         dropout_rate=cfg.dropout_rate)
         
         if cfg.pt_ckpt != '': # load audio-only FT ckpt
-            checkpoint_root = '/share/nas169/jerryyang/whisper-flamingo/models/checkpoints/'
+            checkpoint_root = '/share/nas169/jerryyang/TransKD-ASR/models/checkpoints/'
             state_dict = torch.load(os.path.join(checkpoint_root, cfg.pt_ckpt), map_location=torch.device('cpu'))
             state_dict = state_dict['state_dict']
             state_dict_updated = {k[6:]: v  for k, v in state_dict.items()} # remove 'model.'
@@ -220,12 +220,12 @@ class WhisperModelModule(LightningModule):
         log_prefix = {0: 'val', 1: 'test'}
         self.log("{}/loss".format(log_prefix[dataloader_idx]), loss, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/cer".format(log_prefix[dataloader_idx]), cer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
-        self.log("{}/wer".format(log_prefix[dataloader_idx]), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
+        # self.log("{}/wer".format(log_prefix[dataloader_idx]), wer, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
         self.log("{}/acc".format(log_prefix[dataloader_idx]), acc, on_step=False, prog_bar=True, logger=True, sync_dist=True, add_dataloader_idx=False)
 
         return {
             "cer": cer,
-            "wer": wer,
+            # "wer": wer,
             "loss": loss
         }
 
@@ -311,7 +311,7 @@ print(cfg)
 print("audio max length: {}".format(cfg.audio_max_length))
 
 # Initialize WandB
-wandb.init(project="whisper-flamingo",
+wandb.init(project="TransKD-ASR",
            config=cfg,
            name="whisper small finetune on yttd_taigi_trs (num_train_steps = 80k, warmup_steps = 8k)",
 )

@@ -25,14 +25,16 @@ dropout_rate: 0
 lang: zh
 resume_training: False
 
-teacher_ckpt: 'whisbert-flamingo_taigi_small/step-178000-cer_at=0.1617.ckpt'
+teacher_ckpt: 'trans_asr_taigi/step-176000-cer_at=0.1584.ckpt'
+# teacher_ckpt: 'whisbert-flamingo_taigi_small/step-178000-cer_at=0.1617.ckpt'
 # student_ckpt: 'distil-whisbert-flamingo_taigi pseudo labels(db=12, lr=1.0e-6, bs=16)/step-76000-cer_at=0.1550.ckpt'
-train_id: distil-whisbert-flamingo_taigi pseudo labels revise(db=12, lr=1.0e-6, bs=16)
+train_id: transkd_asr_taigi
 
 # text
 add_gated_x_attn: 1 # 0 for False, 1 for True
-bert_encoder: True
-mode: "translation"
+num_langs: 1
+# bert_encoder: True
+# mode: "translation"
 
 # distil
 freeze_encoder: 1
@@ -40,7 +42,7 @@ alpha: 0.8
 beta: 1.0
 temperature: 2.0
 use_pseudo_labels: True
-pseudo_csv_path_train: /share/nas169/jerryyang/whisper-flamingo/pseudo_labels/yttd_taigi_trs/distil-whisper/pseudo_labels_train.csv
+pseudo_csv_path_train: /share/nas169/jerryyang/TransKD-ASR/pseudo_labels/yttd_taigi_trs/distil-whisper/pseudo_labels_train.csv
 
 log_output_dir: "slurm/train_text_slurm"
 check_output_dir: "models/checkpoints"
